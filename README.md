@@ -34,7 +34,23 @@ This guide explains how to set up the Auto-Attendance tracker on a **New Windows
 
 ---
 
-## 💻 1. Windows Installation (Easy)
+## ⚡ Fast One-Click Setup (Recommended)
+The easiest way to get started on a new computer. 
+*(Note: You must have **Python 3** installed first. See [Prerequisites](#-prerequisites) below).*
+
+### Windows
+1. Double-click `install.bat`. It will set up your environment automatically.
+2. Double-click `run.bat` to launch the app!
+
+### Mac (macOS)
+1. Open Terminal in the project folder.
+2. Run `chmod +x *.sh` (first time only).
+3. Run `./install.sh` to set up.
+4. Run `./run.sh` to launch!
+
+---
+
+## 💻 1. Windows Installation (Manual)
 
 ### Step 1: Install Python
 When installing Python from the official website, make sure to check the box: **"Add Python to PATH"**.
@@ -55,35 +71,40 @@ python app.py
 
 ---
 
-## 🍎 2. Mac (macOS) Installation
+## 🍎 2. Mac (macOS) Installation (Fast Way)
 
-### Step 1: Install Python & Xcode Tools
-Open the **Terminal** application and run these commands to set up the environment:
-```bash
-xcode-select --install
-```
-(Follow the prompts to install the Apple Developer tools). Then download Python 3.11 from python.org.
+### Step 1: Download & Open Terminal
+Download the code from GitHub and extract the folder. Open the **Terminal** app.
 
-### Step 2: Create a Virtual Environment (Recommended on Mac)
+### Step 2: Navigate to Folder
+Type `cd ` (with a space) and **drag your project folder** into the Terminal. Press Enter.
+
+### Step 3: Run Setup
+Run these two commands in order:
 ```bash
-cd /Path/To/Your/Auto-Attendance
-python3 -m venv venv
-source venv/bin/activate
+chmod +x *.sh
+./install.sh
+```
+*Wait for it to finish.* Then, whenever you want to start the app, just run:
+```bash
+./run.sh
 ```
 
-### Step 3: Install Dependencies
-```bash
-pip install -r requirements.txt
-```
-> [!NOTE]
-> If you have an **M1, M2, or M3 Mac**, you might need to run `pip install onnxruntime-silicon` instead of standard `onnxruntime` if you encounter processing errors.
-
-### Step 4: Run the App
-```bash
-python3 app.py
-```
 > [!IMPORTANT]
 > macOS will ask for permission to access the **Camera**. You must click **"Allow"** for the facial recognition to work.
+
+## ✨ Pro Tip: Create a Desktop Shortcut
+To make it even easier for others, you can create a shortcut on your desktop:
+
+### Windows
+1. Open the project folder.
+2. **Right-click** `run.bat` > **Send to** > **Desktop (create shortcut)**.
+3. Rename the shortcut on your desktop to **"Auto-Attendance"**.
+
+### Mac (macOS)
+1. Open the project folder.
+2. **Right-click** `run.sh` > **Make Alias**.
+3. Drag the **Alias** to your desktop and rename it.
 
 ---
 
