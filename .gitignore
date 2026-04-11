@@ -1,0 +1,52 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+.venv/
+venv/
+ENV/
+
+# Project Specific - Privacy / Data
+registered_faces/
+records/
+database/*.db
+!database/attendance_template.db
+reports/
+cache/
+logs/
+
+# AI Models (Large files)
+models/
+
+# System / IDE
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Misc
+*.spec
+temp_import/
+temp_export/
+working_cams.txt
+fourcc_log.txt
+post.txt
+record.txt

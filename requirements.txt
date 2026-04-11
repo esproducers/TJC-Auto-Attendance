@@ -1,0 +1,11 @@
+# Python Requirements for Auto-Attendance
+
+opencv-python
+numpy
+pandas
+insightface
+customtkinter
+Pillow
+fpdf
+openpyxl
+onnxruntime
