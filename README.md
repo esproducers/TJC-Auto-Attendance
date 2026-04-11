@@ -1,11 +1,5 @@
 # Auto-Attendance System for Church / 教会自动人脸识别点名系统
 
-[English Version](#english-version) | [中文说明](#%E4%B8%AD%E6%96%87%E8%AF%B4%E6%98%8E)
-
----
-
-## English Version
-
 ### 📋 System Overview
 This system utilizes the InsightFace facial recognition engine specifically tailored to automatically log the attendance of church-goers as they walk through the entry gate using a fixed camera. It recognizes the congregation's identities, records attendance independently, and writes detailed daily and categorical Excel reports. Everything operates entirely offline for strict privacy guarantees. All you need is a PC or Raspberry Pi plus a USB camera.
 
