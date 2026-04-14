@@ -34,44 +34,30 @@ This guide explains how to set up the Auto-Attendance tracker on a **New Windows
 
 ---
 
-## ⚡ Fast One-Click Setup (Recommended)
-The easiest way to get started on a new computer. 
-*(Note: You must have **Python 3** installed first. See [Prerequisites](#-prerequisites) below).*
-
-### Windows
-1. Double-click `install.bat`. It will set up your environment automatically.
-2. Double-click `run.bat` to launch the app!
-
-### Mac (macOS)
-1. Open Terminal in the project folder.
-2. Run `chmod +x *.sh` (first time only).
-3. Run `./install.sh` to set up.
-4. Run `./run.sh` to launch!
-
----
-
-## 💻 1. Windows Installation (Manual)
+## 💻 1. Windows Installation
 
 ### Step 1: Install Python
 When installing Python from the official website, make sure to check the box: **"Add Python to PATH"**.
 
 ### Step 2: Download the Code
-Copy the `Auto-Attendance` folder to your new computer (e.g., to your Documents folder).
+Downlaod and extract the `Auto-Attendance` folder to your computer (e.g., C:\Program Files).
 
-### Step 3: Install Dependencies
-Open **PowerShell** or **Command Prompt** (CMD), navigate to the folder, and run:
+### Step 3: Run Setup
+Open the folder, and Double-click "install" to auto insatll:
 ```powershell
-pip install -r requirements.txt
+install.bat
 ```
 
 ### Step 4: Run the App
-```powershell
-python app.py
+*Wait for it to finish.* Then, whenever you want to start the app, just run:
+```bash
+run.bat
+```
 ```
 
 ---
 
-## 🍎 2. Mac (macOS) Installation (Fast Way)
+## 🍎 2. Mac (macOS) Installation
 
 ### Step 1: Download & Open Terminal
 Download the code from GitHub and extract the folder. Open the **Terminal** app.
@@ -85,6 +71,8 @@ Run these two commands in order:
 chmod +x *.sh
 ./install.sh
 ```
+
+### Step 4: Run the App
 *Wait for it to finish.* Then, whenever you want to start the app, just run:
 ```bash
 ./run.sh
@@ -116,15 +104,7 @@ If you want to move your existing members and photos to the new computer:
 
 ---
 
-## 🚀 4. "One-Click" Portable Version (Optional)
-If you want to run the app as a single `.exe` file on Windows without installing anything:
-1. Install PyInstaller: `pip install pyinstaller`
-2. Run: `pyinstaller --onefile --windowed app.py`
-This will create a `dist/app.exe` that you can just double-click!
-```
-
-
-### 📁 Environment Directory Tree Map Structure
+## 📁4. Environment Directory Tree Map Structure
 - `main.py`: Internal backbone controller (Real-time Detection + Logging Event Router).
 - `report.py`: Script dedicated functionally to printing Excel analysis.
 - `requirements.txt`: Master blueprint of pip dependencies dictating native compatibility.
