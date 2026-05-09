@@ -43,7 +43,7 @@ When installing Python from the official website, make sure to check the box: **
 Downlaod and extract the `Auto-Attendance` folder to your computer (e.g., C:\Program Files).
 
 ### Step 3: Run Setup
-Open the folder, and Double-click "install" to auto insatll:
+Open the folder, and Double-click "install" to auto install:
 ```powershell
 install.bat
 ```
@@ -57,15 +57,14 @@ run.bat
 
 ---
 
-## 🍎 2. Mac (macOS) Installation
-
+**## 🍎 2. Mac (macOS) Installation**
 ### Step 1: Download & Open Terminal
 Download the code from GitHub and extract the folder. Open the **Terminal** app.
 
-### Step 2: Navigate to Folder
+**### Step 2: Navigate to Folder**
 Type `cd ` (with a space) and **drag your project folder** into the Terminal. Press Enter.
 
-### Step 3: Run Setup
+**### Step 3: Run Setup**
 Run these two commands in order:
 ```bash
 chmod +x *.sh
