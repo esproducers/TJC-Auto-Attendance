@@ -1,7 +1,7 @@
 # Python Requirements for Auto-Attendance
 
 opencv-python
-numpy
+numpy<2
 pandas
 insightface
 customtkinter

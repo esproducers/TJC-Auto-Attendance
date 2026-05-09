@@ -41,8 +41,8 @@ class ReportGenerator:
         conn.close()
 
         p_members = len(df[df['status'].str.lower() == 'member'])
-        p_gospel  = len(df[df['status'].str.lower().str.contains('gospel', na=False)])
-        p_total   = p_members + p_gospel
+        p_truth   = len(df[df['status'].str.lower().str.contains('truth', na=False)])
+        p_total   = p_members + p_truth
         waiting   = len(df[df['status'].str.lower() == 'unknown']) if not df.empty else 0
 
         # Area rate
@@ -64,7 +64,7 @@ class ReportGenerator:
             "Target Total": target or 0,
             "Total Present": p_total,
             "Members": p_members,
-            "Gospel Friends": p_gospel,
+            "Truth Seekers": p_truth,
             "Waiting Recognition": waiting,
             "Area Rate %": f"{area_rate:.1f}%",
             "Overall Rate %": f"{overall_rate:.1f}%",
@@ -87,7 +87,7 @@ class ReportGenerator:
                     "Date": r["Date"],
                     "Total Present": r["Total Present"],
                     "Members": r["Members"],
-                    "Gospel Friends": r["Gospel Friends"],
+                    "Truth Seekers": r["Truth Seekers"],
                     "Waiting Recognition": r["Waiting Recognition"],
                     "Area Rate %": r["Area Rate %"],
                     "Overall Rate %": r["Overall Rate %"]
@@ -142,6 +142,9 @@ class ReportGenerator:
         def_area_label = settings.get("default_area", "")
 
         # Header (Logo=LEFT, Name/Address=CENTERED)
+        if logo_path and not os.path.isabs(logo_path):
+            logo_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), logo_path)
+
         if logo_path and os.path.exists(logo_path):
             pdf.image(logo_path, 20, 10, 30)
             
@@ -179,7 +182,7 @@ class ReportGenerator:
             # Table header
             pdf.set_fill_color(220, 230, 241)
             pdf.set_font("Arial", 'B', 9)
-            cols = ["Session Title", "Date", "Total", "Member", "Gospel", "Area %", "Overall %"]
+            cols = ["Session Title", "Date", "Total", "Member", "Truth Seeker", "Area %", "Overall %"]
             w = [55, 25, 18, 18, 20, 27, 27]
             for i, c in enumerate(cols):
                 pdf.cell(w[i], 10, c, 1, 0, 'C', True)
@@ -191,7 +194,7 @@ class ReportGenerator:
                 pdf.cell(w[1], 9, str(r["Date"]), 1, 0, 'C')
                 pdf.cell(w[2], 9, str(r["Total Present"]), 1, 0, 'C')
                 pdf.cell(w[3], 9, str(r["Members"]), 1, 0, 'C')
-                pdf.cell(w[4], 9, str(r["Gospel Friends"]), 1, 0, 'C')
+                pdf.cell(w[4], 9, str(r["Truth Seekers"]), 1, 0, 'C')
                 pdf.cell(w[5], 9, str(r["Area Rate %"]), 1, 0, 'C')
                 pdf.cell(w[6], 9, str(r["Overall Rate %"]), 1, 0, 'C')
                 pdf.ln()
@@ -258,7 +261,7 @@ class ReportGenerator:
 
         right_cell("Total Present", stats["Total Present"])
         right_cell("Member Present", stats["Members"])
-        right_cell("Gospel Friend Present", stats["Gospel Friends"])
+        right_cell("Truth Seeker Present", stats["Truth Seekers"])
         
         # Member Rate = Area Present / Area Total
         a_p, a_t = stats["Area Present"], stats["Area Total"]
@@ -317,11 +320,12 @@ class ReportGenerator:
         conn = sqlite3.connect(self.db_path)
         ph = ",".join("?" * len(member_ids))
         query = f"""
-            SELECT member_code as 'Member ID', name as 'Name', type as 'Type', age as 'Age', 
+            SELECT member_code as 'Member ID', name as 'Name', type as 'Type', age_category as 'Age Category', 
                    dob as 'Date of Birth', area as 'Area', address as 'Address', 
                    phone as 'Phone', email as 'Email', baptism_date as 'Date of Baptism',
                    CASE WHEN has_holy_spirit = 1 THEN 'Yes' ELSE 'No' END as 'Has Holy Spirit',
-                   registration_date as 'Registration Date'
+                   registration_date as 'Registration Date',
+                   remark as 'Remark'
             FROM members 
             WHERE member_code IN ({ph})
         """
@@ -334,7 +338,7 @@ class ReportGenerator:
         """Export member directory/list to PDF with profile cards."""
         conn = sqlite3.connect(self.db_path)
         ph = ",".join("?" * len(member_ids))
-        query = f"SELECT member_code, name, type, age, area, address, phone, email, dob, baptism_date, has_holy_spirit, image_path FROM members WHERE member_code IN ({ph})"
+        query = f"SELECT member_code, name, type, age_category, area, address, phone, email, dob, baptism_date, has_holy_spirit, image_path, remark FROM members WHERE member_code IN ({ph})"
         rows = conn.execute(query, member_ids).fetchall()
         conn.close()
 
@@ -344,7 +348,8 @@ class ReportGenerator:
             m = {
                 "code": r[0], "name": r[1], "type": r[2], "age": r[3], "area": r[4],
                 "address": r[5], "phone": r[6], "email": r[7], "dob": r[8],
-                "baptism_date": r[9], "has_holy_spirit": r[10], "image": r[11]
+                "baptism_date": r[9], "has_holy_spirit": r[10], "image": r[11],
+                "remark": r[12] if len(r) > 12 else ""
             }
             
             pdf.add_page()
@@ -367,9 +372,13 @@ class ReportGenerator:
             # 1. Member Photo (Left)
             photo_w, photo_h = 45, 45
             has_photo = False
-            if m["image"] and os.path.exists(m["image"]):
+            img_p = m["image"]
+            if img_p and not os.path.isabs(img_p):
+                img_p = os.path.join(os.path.dirname(os.path.abspath(__file__)), img_p)
+
+            if img_p and os.path.exists(img_p):
                 try:
-                    pdf.image(m["image"], x=15, y=start_y, w=photo_w)
+                    pdf.image(img_p, x=15, y=start_y, w=photo_w)
                     has_photo = True
                 except: pass
             
@@ -398,7 +407,7 @@ class ReportGenerator:
 
             add_detail_row("Member ID", m["code"], True)
             add_detail_row("Type", m["type"])
-            add_detail_row("Age", m["age"])
+            add_detail_row("Age Category", m["age"])
             add_detail_row("Area", m["area"])
             add_detail_row("Date of Birth", m["dob"])
             add_detail_row("Date of Baptism", m["baptism_date"])
@@ -406,7 +415,6 @@ class ReportGenerator:
             add_detail_row("Phone Number", m["phone"])
             add_detail_row("Email Address", m["email"])
             
-            # Home Address (aligned with others)
             pdf.set_x(info_x)
             pdf.set_font("Arial", 'B', 10)
             pdf.set_text_color(107, 114, 128)
@@ -414,6 +422,14 @@ class ReportGenerator:
             pdf.set_font("Arial", '', 10)
             pdf.set_text_color(31, 41, 55)
             pdf.multi_cell(0, 7, m["address"] if m["address"] else "--")
+
+            # --- REMARK SECTION ---
+            pdf.ln(5)
+            pdf.set_font("Arial", 'B', 11)
+            pdf.set_text_color(31, 41, 55)
+            pdf.cell(0, 10, "Remark:", ln=True)
+            pdf.set_font("Arial", '', 10)
+            pdf.multi_cell(0, 6, m["remark"] if m["remark"] else "--")
 
         pdf.output(out_path)
         return out_path

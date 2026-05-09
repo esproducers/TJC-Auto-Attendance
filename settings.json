@@ -1,10 +1,12 @@
 {
-    "logo_path": "C:/Users/hp/Downloads/id1f5vnboa_logos.jpeg",
+    "logo_path": "assets/logo.jpeg",
     "church_name": "TRUE JESUS CHURCH",
     "theme": "light",
-    "default_area": "",
+    "default_area": "SKUDAI",
     "camera_id": 0,
     "address": "",
     "last_backup": "07-Apr-2026 22:13:24",
-    "member_prefix": ""
+    "member_prefix": "SK",
+    "admin_pass": "admin123",
+    "admin_hint": "skudai"
 }

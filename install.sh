@@ -15,8 +15,9 @@ python3 -m venv venv
 
 echo "[2/3] Installing dependencies..."
 source venv/bin/activate
-pip install --upgrade pip
-pip install -r requirements.txt
+python3 -m pip install --upgrade pip
+python3 -m pip install "numpy<2"
+python3 -m pip install -r requirements.txt
 
 echo "[3/3] Creating data folders..."
 mkdir -p registered_faces database cache records reports

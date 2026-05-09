@@ -23,13 +23,13 @@ ctk.set_default_color_theme("blue")
 
 def _type_color(t):
     t = (t or "").lower()
-    if "gospel" in t: return "#17A2B8"
+    if "truth" in t: return "#17A2B8"
     if "unknown" in t: return "#DC3545"
     return "#007BFF"
 
 def _type_label(t):
     t = (t or "").lower()
-    if "gospel" in t: return "Gospel"
+    if "truth" in t: return "Truth Seeker"
     if "unknown" in t: return "?"
     return "Member"
 
@@ -231,6 +231,118 @@ class CustomCalendar(ctk.CTkFrame):
         if self.cur_month > 12: self.cur_month = 1; self.cur_year += 1
         self.render_month(self.cur_month, self.cur_year)
 
+class WheelDatePicker(ctk.CTkToplevel):
+    def __init__(self, parent, title, initial_val="", on_ok=None):
+        super().__init__(parent)
+        self.title(title)
+        self.geometry("400x520")
+        self.attributes("-topmost", True)
+        self.grab_set()
+        self.resizable(False, False)
+        self.configure(fg_color="#FFFFFF")
+        
+        self.on_ok = on_ok
+        self.MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
+        
+        # Parse initial (DD-MM-YYYY)
+        now = datetime.now()
+        d_init, m_init, y_init = now.day, self.MONTHS[now.month-1], now.year
+        if initial_val:
+            try:
+                parts = initial_val.split("-")
+                if len(parts) == 3:
+                    if len(parts[0]) == 2: # DD-MM-YYYY
+                        d_init = int(parts[0])
+                        m_init = self.MONTHS[int(parts[1])-1]
+                        y_init = int(parts[2])
+                    else: # YYYY-MM-DD
+                        y_init = int(parts[0])
+                        m_init = self.MONTHS[int(parts[1])-1]
+                        d_init = int(parts[2])
+            except: pass
+            
+        self.sel_d = ctk.IntVar(value=d_init)
+        self.sel_m = ctk.StringVar(value=m_init)
+        self.sel_y = ctk.IntVar(value=y_init)
+        
+        # Header
+        ctk.CTkLabel(self, text=title, font=("Arial", 24, "bold"), text_color="#1F2937").pack(pady=(25, 20))
+        
+        # Container for wheels
+        wheel_frame = ctk.CTkFrame(self, fg_color="transparent")
+        wheel_frame.pack(fill="both", expand=True, padx=30)
+        
+        # Selection Highlight (The blue bar in the middle)
+        highlight = ctk.CTkFrame(wheel_frame, fg_color="#F3F4F6", height=45, corner_radius=10)
+        highlight.place(relx=0.5, rely=0.5, anchor="center", relwidth=1.0)
+        
+        self.cols = {}
+        
+        # Day Column
+        self._create_column(wheel_frame, "Day", [f"{i:02d}" for i in range(1, 32)], self.sel_d, 0)
+        # Month Column
+        self._create_column(wheel_frame, "Month", self.MONTHS, self.sel_m, 1)
+        # Year Column
+        self._create_column(wheel_frame, "Year", [str(i) for i in range(1900, 2101)], self.sel_y, 2)
+        
+        # Buttons
+        btn_f = ctk.CTkFrame(self, fg_color="transparent")
+        btn_f.pack(fill="x", pady=25, padx=30)
+        
+        ctk.CTkButton(btn_f, text="Cancel", fg_color="#F3F4F6", text_color="#374151", hover_color="#E5E7EB", 
+                      height=45, corner_radius=22, command=self.destroy).pack(side="left", expand=True, padx=(0, 10), fill="x")
+        
+        ctk.CTkButton(btn_f, text="OK", fg_color="#007BFF", hover_color="#0069D9", 
+                      height=45, corner_radius=22, command=self._on_ok_click).pack(side="left", expand=True, fill="x")
+
+    def _create_column(self, parent, label, values, var, col_idx):
+        frame = ctk.CTkFrame(parent, fg_color="transparent")
+        frame.pack(side="left", expand=True, fill="both")
+        
+        scroll = ctk.CTkScrollableFrame(frame, fg_color="transparent", height=250, width=80)
+        scroll.pack(fill="both", expand=True)
+        
+        # Store buttons to update their color
+        btns = []
+        
+        def select(val, btn):
+            try:
+                var.set(val)
+            except:
+                var.set(str(val))
+            # Update colors
+            for b in btns:
+                b.configure(text_color="#6B7280", font=("Arial", 14))
+            btn.configure(text_color="#007BFF", font=("Arial", 18, "bold"))
+            # Scroll to make it central (best effort)
+            # scroll._parent_canvas.yview_moveto(...) is internal, skipping for now
+            
+        for val in values:
+            is_sel = (str(val) == str(var.get()) or (isinstance(val, int) and val == var.get()))
+            color = "#007BFF" if is_sel else "#6B7280"
+            font = ("Arial", 18, "bold") if is_sel else ("Arial", 14)
+            
+            btn = ctk.CTkButton(scroll, text=str(val), fg_color="transparent", text_color=color, 
+                                hover_color="#F3F4F6", font=font, height=40,
+                                command=lambda v=val, b=None: select(v, b))
+            btn.configure(command=lambda v=val, b=btn: select(v, b))
+            btn.pack(fill="x")
+            btns.append(btn)
+            
+            if is_sel:
+                # Try to scroll to it after a short delay
+                self.after(100, lambda b=btn: scroll._parent_canvas.yview_moveto(max(0, (btns.index(b)-2)/len(btns))))
+
+    def _on_ok_click(self):
+        d = self.sel_d.get()
+        m = self.sel_m.get()
+        y = self.sel_y.get()
+        m_idx = self.MONTHS.index(m) + 1
+        res = f"{d:02d}-{m_idx:02d}-{y}"
+        if self.on_ok:
+            self.on_ok(res)
+        self.destroy()
+
 class AutoAttendanceApp(ctk.CTk):
     def __init__(self):
         super().__init__()
@@ -258,6 +370,12 @@ class AutoAttendanceApp(ctk.CTk):
         
         self.capture_feedback = {"msg": "", "expiry": 0, "color": (0,255,0)}
         self.image_cache = {} # Map img_path -> CTKImage
+        self.is_admin = False
+        if "admin_pass" not in self.settings:
+            self.settings["admin_pass"] = "admin123"
+        if "admin_hint" not in self.settings:
+            self.settings["admin_hint"] = "skudai"
+        self.save_settings()
 
         self.grid_columnconfigure(1, weight=1)
         self.grid_rowconfigure(0, weight=1)
@@ -287,6 +405,19 @@ class AutoAttendanceApp(ctk.CTk):
         self.show_frame("dashboard")
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
         self.update_camera()
+
+        # Update README with admin info
+        self._update_readme_admin()
+
+    def _update_readme_admin(self):
+        if os.path.exists("README.md"):
+            try:
+                with open("README.md", "r") as f:
+                    content = f.read()
+                if "ADMIN ACCESS" not in content:
+                    with open("README.md", "a") as f:
+                        f.write("\n\n## ADMIN ACCESS\n- **Username**: admin\n- **Default Password**: admin123\n- **Features**: Full data visibility, Exports, Reports, Organization Chart, and Settings.\n")
+            except: pass
 
     def on_closing(self):
         self.is_marking = False
@@ -338,9 +469,172 @@ class AutoAttendanceApp(ctk.CTk):
                                 command=lambda k=key: self.show_frame(k))
             btn.pack(pady=3, padx=12, fill="x")
             self.nav_buttons[key] = btn
+        
+        # Admin Login/Logout at bottom
+        self.sidebar_bottom = ctk.CTkFrame(self.sidebar, fg_color="transparent")
+        self.sidebar_bottom.pack(side="bottom", fill="x", pady=20)
+        
+        self.login_btn = ctk.CTkButton(self.sidebar_bottom, text="🔐 Admin Login", font=("Arial", 12, "bold"),
+                                       height=38, fg_color="#F3F4F6", text_color="#374151",
+                                       hover_color="#E5E7EB", command=self.on_login_click)
+        self.login_btn.pack(padx=12, fill="x")
+        
+        self.refresh_sidebar_visibility()
+
+    def refresh_sidebar_visibility(self):
+        # Hide restricted buttons for public
+        restricted = ["reports", "org_chart", "settings"]
+        for key in restricted:
+            if key in self.nav_buttons:
+                if self.is_admin:
+                    self.nav_buttons[key].pack(pady=3, padx=12, fill="x")
+                else:
+                    self.nav_buttons[key].pack_forget()
+        
+        # Update login button text
+        if self.is_admin:
+            self.login_btn.configure(text="🔓 Logout", fg_color="#FEE2E2", text_color="#EF4444", hover_color="#FECACA")
+        else:
+            self.login_btn.configure(text="🔐 Admin Login", fg_color="#F3F4F6", text_color="#374151", hover_color="#E5E7EB")
+
+    def refresh_members_ui_visibility(self):
+        # Hide restricted buttons for public on Members page
+        # Check both sync_f and actions_f exist and are valid widgets
+        has_sync = hasattr(self, "sync_f") and self.sync_f.winfo_exists()
+        has_actions = hasattr(self, "actions_f") and self.actions_f.winfo_exists()
+        
+        if self.is_admin:
+            if has_sync: self.sync_f.pack(side="right", anchor="ne", pady=10)
+            if has_actions: self.actions_f.pack(side="right", padx=15, pady=10)
+        else:
+            if has_sync: self.sync_f.pack_forget()
+            if has_actions: self.actions_f.pack_forget()
+
+    def on_login_click(self):
+        if self.is_admin:
+            if messagebox.askyesno("Logout", "Are you sure you want to logout?"):
+                self.is_admin = False
+                self.refresh_sidebar_visibility()
+                self.refresh_members_ui_visibility()
+                self.show_frame("dashboard")
+                self.refresh_member_table()
+        else:
+            self.show_login_popup()
+
+    def show_login_popup(self):
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Admin Login")
+        dialog.geometry("340x420")
+        dialog.attributes("-topmost", True)
+        dialog.grab_set()
+        
+        ctk.CTkLabel(dialog, text="🔒", font=("Arial", 50)).pack(pady=(30, 10))
+        ctk.CTkLabel(dialog, text="Admin Access Required", font=("Arial", 16, "bold")).pack(pady=5)
+        
+        ctk.CTkLabel(dialog, text="Username", font=("Arial", 12)).pack(anchor="w", padx=40, pady=(20, 0))
+        user_e = ctk.CTkEntry(dialog, width=260, placeholder_text="Enter username")
+        user_e.insert(0, "admin")
+        user_e.pack(pady=5)
+        
+        ctk.CTkLabel(dialog, text="Password", font=("Arial", 12)).pack(anchor="w", padx=40, pady=(10, 0))
+        pass_e = ctk.CTkEntry(dialog, width=260, show="*", placeholder_text="Enter password")
+        pass_e.pack(pady=5)
+        
+        def do_login():
+            u = user_e.get().strip()
+            p = pass_e.get().strip()
+            if u == "admin" and p == self.settings.get("admin_pass", "admin123"):
+                self.is_admin = True
+                self.refresh_sidebar_visibility()
+                self.refresh_members_ui_visibility()
+                self.refresh_member_table()
+                dialog.destroy()
+                messagebox.showinfo("Success", "Welcome back, Admin!")
+            else:
+                messagebox.showerror("Error", "Invalid credentials.")
+        
+        def forget_pass():
+            dialog.destroy()
+            self.show_verify_hint_popup()
+
+        ctk.CTkButton(dialog, text="Login", width=260, height=40, font=("Arial", 13, "bold"), command=do_login).pack(pady=(30, 10))
+        ctk.CTkButton(dialog, text="Forget Password?", width=200, height=28, fg_color="transparent", text_color="gray", hover_color="#F0F2F5", command=forget_pass).pack()
+
+    def show_verify_hint_popup(self):
+        v_dialog = ctk.CTkToplevel(self)
+        v_dialog.title("Password Recovery")
+        v_dialog.geometry("340x300")
+        v_dialog.attributes("-topmost", True)
+        v_dialog.grab_set()
+        
+        ctk.CTkLabel(v_dialog, text="🔑", font=("Arial", 40)).pack(pady=(20, 10))
+        ctk.CTkLabel(v_dialog, text="Enter Security Word", font=("Arial", 14, "bold")).pack()
+        ctk.CTkLabel(v_dialog, text="(Set in Admin Settings)", font=("Arial", 10), text_color="gray").pack()
+        
+        hint_e = ctk.CTkEntry(v_dialog, width=260, placeholder_text="Enter hint word")
+        hint_e.pack(pady=20)
+        
+        def verify():
+            h = hint_e.get().strip().lower()
+            correct = self.settings.get("admin_hint", "skudai").lower()
+            if h == correct:
+                v_dialog.destroy()
+                self.show_reset_password_dialog()
+            else:
+                messagebox.showerror("Error", "Incorrect Security Word.", parent=v_dialog)
+                
+        ctk.CTkButton(v_dialog, text="Verify", width=260, height=35, command=verify).pack()
+
+    def show_reset_password_dialog(self):
+        r_dialog = ctk.CTkToplevel(self)
+        r_dialog.title("Reset Password")
+        r_dialog.geometry("340x300")
+        r_dialog.attributes("-topmost", True)
+        r_dialog.grab_set()
+        
+        ctk.CTkLabel(r_dialog, text="🔐", font=("Arial", 40)).pack(pady=(20, 10))
+        ctk.CTkLabel(r_dialog, text="Set New Password", font=("Arial", 14, "bold")).pack()
+        
+        new_p = ctk.CTkEntry(r_dialog, width=260, show="*", placeholder_text="Enter new password")
+        new_p.pack(pady=20)
+        
+        def reset():
+            p = new_p.get().strip()
+            if p:
+                self.settings["admin_pass"] = p
+                self.save_settings()
+                messagebox.showinfo("Success", "Password reset successful! Please login with your new password.")
+                r_dialog.destroy()
+                self.show_login_popup()
+            else:
+                messagebox.showwarning("Warning", "Password cannot be empty.", parent=r_dialog)
+                
+        ctk.CTkButton(r_dialog, text="Reset & Login", width=260, height=35, command=reset).pack()
+
+    def show_frame(self, page_id):
+        # Restriction check
+        restricted = ["reports", "org_chart", "settings"]
+        if page_id in restricted and not self.is_admin:
+            messagebox.showwarning("Restricted", "Admin login required to access this page.")
+            return
+
+        frame = self.frames.get(page_id)
+        if frame:
+            frame.grid(row=0, column=0, sticky="nsew")
+            frame.tkraise()
+            self.page_title.configure(text=page_id.replace("_", " ").title())
+            
+            # Update nav button styles
+            for key, btn in self.nav_buttons.items():
+                if key == page_id:
+                    btn.configure(fg_color="#F0F2F5", text_color="#007BFF")
+                else:
+                    btn.configure(fg_color="transparent", text_color="#333")
 
     def _display_logo(self, master):
         lp = self.settings.get("logo_path", "")
+        if lp and not os.path.isabs(lp):
+            lp = os.path.join(os.path.dirname(os.path.abspath(__file__)), lp)
         if lp and os.path.exists(lp):
             try:
                 ci = ctk.CTkImage(light_image=Image.open(lp), size=(60, 60))
@@ -382,7 +676,7 @@ class AutoAttendanceApp(ctk.CTk):
 
         cards_cfg = [("Present Today",       "0",  "#28A745"),
                      ("Members Present",      "0",  "#007BFF"),
-                     ("Gospel Friends",        "0",  "#17A2B8"),
+                     ("Truth Seekers",        "0",  "#17A2B8"),
                      ("Waiting Recognition",   "0",  "#DC3545"),
                      ("Area Rate %",           "0%", "#6F42C1"),
                      ("Overall Rate %",        "0%", "#FFC107")]
@@ -501,10 +795,14 @@ class AutoAttendanceApp(ctk.CTk):
         sub_lbl.pack(anchor="w")
 
         # Sync Buttons (Top Right)
-        sync_f = ctk.CTkFrame(header_frame, fg_color="transparent")
-        sync_f.pack(side="right", anchor="ne", pady=10)
-        ctk.CTkButton(sync_f, text="⬇ Sync Out", width=120, height=36, fg_color="#6366F1", hover_color="#4F46E5", font=("Arial", 11, "bold"), command=self.on_bulk_sync_output).pack(side="left", padx=5)
-        ctk.CTkButton(sync_f, text="⬆ Sync In", width=120, height=36, fg_color="#8B5CF6", hover_color="#7C3AED", font=("Arial", 11, "bold"), command=self.on_bulk_sync_input).pack(side="left", padx=5)
+        self.sync_f = ctk.CTkFrame(header_frame, fg_color="transparent")
+        self.sync_f.pack(side="right", anchor="ne", pady=10)
+        self.sync_out_btn = ctk.CTkButton(self.sync_f, text="⬇ Sync Out", width=120, height=36, fg_color="#6366F1", hover_color="#4F46E5", font=("Arial", 11, "bold"), command=self.on_bulk_sync_output)
+        self.sync_out_btn.pack(side="left", padx=5)
+        self.sync_in_btn = ctk.CTkButton(self.sync_f, text="⬆ Sync In", width=120, height=36, fg_color="#8B5CF6", hover_color="#7C3AED", font=("Arial", 11, "bold"), command=self.on_bulk_sync_input)
+        self.sync_in_btn.pack(side="left", padx=5)
+        
+        # self.refresh_members_ui_visibility() - Moved to end of method
         
         # --- NEW SUMMARY STATS BAR ---
         self.member_stats_frame = ctk.CTkFrame(f, fg_color="transparent")
@@ -514,9 +812,9 @@ class AutoAttendanceApp(ctk.CTk):
         stat_configs = [
             ("Total DB Count", "#3B82F6"),
             ("Area Member", "#10B981"),
-            ("Area Gospel Friend", "#14B8A6"),
+            ("Area Truth Seeker", "#14B8A6"),
             ("Other Area Member", "#6366F1"),
-            ("Other Area Gospel Friend", "#8B5CF6")
+            ("Other Area Truth Seeker", "#8B5CF6")
         ]
         
         for i, (title, color) in enumerate(stat_configs):
@@ -549,7 +847,7 @@ class AutoAttendanceApp(ctk.CTk):
         s_t_f = ctk.CTkFrame(filter_f, fg_color="transparent")
         s_t_f.pack(side="left", padx=10)
         ctk.CTkLabel(s_t_f, text="TYPE", font=("Arial", 10, "bold"), text_color="#9CA3AF").pack(anchor="w")
-        self.member_type_filter = ctk.CTkComboBox(s_t_f, values=["All", "Member", "Gospel Friend"], width=130, command=lambda _: self.refresh_member_table())
+        self.member_type_filter = ctk.CTkComboBox(s_t_f, values=["All", "Member", "Truth Seeker"], width=130, command=lambda _: self.refresh_member_table())
         self.member_type_filter.pack()
 
         # Area Filter
@@ -567,11 +865,15 @@ class AutoAttendanceApp(ctk.CTk):
         ctk.CTkButton(filter_f, text="+ Add Member", width=120, height=36, fg_color="#10B981", hover_color="#059669", font=("Arial", 12, "bold"), command=self.add_member_popup).pack(side="left", padx=10, pady=(15, 0))
 
         # Global Actions (Export)
-        actions_f = ctk.CTkFrame(toolbar, fg_color="transparent")
-        actions_f.pack(side="right", padx=15, pady=10)
+        self.actions_f = ctk.CTkFrame(toolbar, fg_color="transparent")
+        self.actions_f.pack(side="right", padx=15, pady=10)
         
-        ctk.CTkButton(actions_f, text="📕 PDF Export", width=160, height=36, fg_color="#FEE2E2", text_color="#EF4444", hover_color="#FCA5A5", font=("Arial", 11, "bold"), command=lambda: self.on_bulk_member_export("pdf")).pack(side="top", pady=2)
-        ctk.CTkButton(actions_f, text="📗 Excel Export", width=160, height=36, fg_color="#D1FAE5", text_color="#10B981", hover_color="#A7F3D0", font=("Arial", 11, "bold"), command=lambda: self.on_bulk_member_export("excel")).pack(side="top", pady=2)
+        self.bulk_pdf_btn = ctk.CTkButton(self.actions_f, text="📕 PDF Export", width=160, height=36, fg_color="#FEE2E2", text_color="#EF4444", hover_color="#FCA5A5", font=("Arial", 11, "bold"), command=lambda: self.on_bulk_member_export("pdf"))
+        self.bulk_pdf_btn.pack(side="top", pady=2)
+        self.bulk_excel_btn = ctk.CTkButton(self.actions_f, text="📗 Excel Export", width=160, height=36, fg_color="#D1FAE5", text_color="#10B981", hover_color="#A7F3D0", font=("Arial", 11, "bold"), command=lambda: self.on_bulk_member_export("excel"))
+        self.bulk_excel_btn.pack(side="top", pady=2)
+        
+        self.refresh_members_ui_visibility()
 
         # Table Section
         table_container = ctk.CTkFrame(f, fg_color="#FFFFFF", border_width=1, border_color="#E5E7EB", corner_radius=8)
@@ -617,7 +919,7 @@ class AutoAttendanceApp(ctk.CTk):
         q_area = self.member_area_filter.get().strip().lower()
 
         conn  = sqlite3.connect("database/attendance.db")
-        query = "SELECT member_code, name, type, age, area, image_path FROM members WHERE 1=1"
+        query = "SELECT member_code, name, type, age_category, area, image_path FROM members WHERE 1=1"
         params = []
         
         if q_name:
@@ -643,15 +945,15 @@ class AutoAttendanceApp(ctk.CTk):
         
         t_total = len(df)
         t_area_m  = len(df[(df['area'] == curr_area) & (df['type'] == 'Member')])
-        t_area_gf = len(df[(df['area'] == curr_area) & (df['type'] == 'Gospel Friend')])
+        t_area_gf = len(df[(df['area'] == curr_area) & (df['type'] == 'Truth Seeker')])
         t_oth_m   = len(df[(df['area'] != curr_area) & (df['type'] == 'Member')])
-        t_oth_gf  = len(df[(df['area'] != curr_area) & (df['type'] == 'Gospel Friend')])
+        t_oth_gf  = len(df[(df['area'] != curr_area) & (df['type'] == 'Truth Seeker')])
         
         self.member_stats_labels["Total DB Count"].configure(text=str(t_total))
         self.member_stats_labels["Area Member"].configure(text=str(t_area_m))
-        self.member_stats_labels["Area Gospel Friend"].configure(text=str(t_area_gf))
+        self.member_stats_labels["Area Truth Seeker"].configure(text=str(t_area_gf))
         self.member_stats_labels["Other Area Member"].configure(text=str(t_oth_m))
-        self.member_stats_labels["Other Area Gospel Friend"].configure(text=str(t_oth_gf))
+        self.member_stats_labels["Other Area Truth Seeker"].configure(text=str(t_oth_gf))
         # -----------------------------
 
         if df.empty:
@@ -659,7 +961,7 @@ class AutoAttendanceApp(ctk.CTk):
             return
 
         for _, row_data in df.iterrows():
-            code, name, m_type, age, area, img_p = row_data['member_code'], row_data['name'], row_data['type'], row_data['age'], row_data['area'], row_data['image_path']
+            code, name, m_type, age, area, img_p = row_data['member_code'], row_data['name'], row_data['type'], row_data['age_category'], row_data['area'], row_data['image_path']
             row = ctk.CTkFrame(self.member_scroll, fg_color="transparent", height=85)
             row.pack(fill="x", pady=0)
             row.grid_columnconfigure(0, minsize=40); row.grid_columnconfigure(1, minsize=80)
@@ -698,21 +1000,20 @@ class AutoAttendanceApp(ctk.CTk):
             act_f = ctk.CTkFrame(row, fg_color="transparent")
             act_f.grid(row=0, column=5, sticky="e", padx=5)
             
-            btn_edit = ctk.CTkButton(act_f, text="✎", width=30, height=30, fg_color="transparent", text_color="#10B981", hover_color="#D1FAE5", font=("Arial", 14), command=lambda c=code: self.on_edit_member(c))
-            btn_edit.pack(side="left", padx=1)
-            Tooltip(btn_edit, "Edit Member Details")
-
-            btn_pdf = ctk.CTkButton(act_f, text="📕", width=30, height=30, fg_color="transparent", text_color="#EF4444", hover_color="#FEE2E2", font=("Arial", 14), command=lambda c=code: self.on_individual_member_export("pdf", c))
-            btn_pdf.pack(side="left", padx=1)
-            Tooltip(btn_pdf, "Download PDF Profile")
-
-            btn_excel = ctk.CTkButton(act_f, text="📗", width=30, height=30, fg_color="transparent", text_color="#059669", hover_color="#D1FAE5", font=("Arial", 14), command=lambda c=code: self.on_individual_member_export("excel", c))
-            btn_excel.pack(side="left", padx=1)
-            Tooltip(btn_excel, "Download Excel Data")
-
-            btn_del = ctk.CTkButton(act_f, text="🗑", width=30, height=30, fg_color="transparent", text_color="#EF4444", hover_color="#FEE2E2", font=("Arial", 14), command=lambda c=code: self.on_delete_member(c))
-            btn_del.pack(side="left", padx=1)
-            Tooltip(btn_del, "Delete Member Record")
+            if self.is_admin:
+                btn_edit = ctk.CTkButton(act_f, text="✎", width=30, height=30, fg_color="transparent", text_color="#10B981", hover_color="#D1FAE5", font=("Arial", 14), command=lambda c=code: self.on_edit_member(c))
+                btn_edit.pack(side="left", padx=1)
+                Tooltip(btn_edit, "Edit Member Details")
+    
+                btn_pdf = ctk.CTkButton(act_f, text="📕", width=30, height=30, fg_color="transparent", text_color="#EF4444", hover_color="#FEE2E2", font=("Arial", 14), command=lambda c=code: self.on_individual_member_export("pdf", c))
+                btn_pdf.pack(side="left", padx=1)
+                Tooltip(btn_pdf, "Export Member Profile")
+    
+                btn_del = ctk.CTkButton(act_f, text="🗑", width=30, height=30, fg_color="transparent", text_color="#9CA3AF", hover_color="#F3F4F6", font=("Arial", 14), command=lambda c=code: self.on_delete_member(c))
+                btn_del.pack(side="left", padx=1)
+                Tooltip(btn_del, "Delete Member")
+            else:
+                ctk.CTkLabel(act_f, text="[Admin only]", font=("Arial", 10), text_color="gray").pack(side="left", padx=10)
 
             ctk.CTkFrame(self.member_scroll, height=1, fg_color="#F3F4F6").pack(fill="x", padx=10)
 
@@ -906,7 +1207,7 @@ class AutoAttendanceApp(ctk.CTk):
         self.select_all_cb = ctk.CTkCheckBox(th, text="", variable=self.select_all_var, width=20, command=self.toggle_select_all)
         self.select_all_cb.grid(row=0, column=0, padx=(10, 0))
 
-        headers = [("SESSION TITLE / DATE", 1), ("TOTAL", 2), ("MEMBER", 3), ("GOSPEL", 4), ("AREA %", 5), ("OVERALL %", 6), ("SPEC. %", 7), ("ACTIONS", 8)]
+        headers = [("SESSION TITLE / DATE", 1), ("TOTAL", 2), ("MEMBER", 3), ("TRUTH SEEKER", 4), ("AREA %", 5), ("OVERALL %", 6), ("SPEC. %", 7), ("ACTIONS", 8)]
         for name, col in headers:
             ctk.CTkLabel(th, text=name, font=("Arial", 11, "bold"), text_color="#9CA3AF").grid(row=0, column=col, sticky="w", padx=10)
 
@@ -1060,7 +1361,7 @@ class AutoAttendanceApp(ctk.CTk):
                     att_res = c.execute("""
                         SELECT COUNT(a.id),
                                SUM(CASE WHEN LOWER(a.status) = 'member' THEN 1 ELSE 0 END),
-                               SUM(CASE WHEN a.status LIKE '%gospel%' THEN 1 ELSE 0 END),
+                               SUM(CASE WHEN a.status LIKE '%truth%' THEN 1 ELSE 0 END),
                                SUM(CASE WHEN a.status = 'unknown' THEN 1 ELSE 0 END)
                         FROM attendance a WHERE a.session_id=?
                     """, (sid,)).fetchone()
@@ -1122,7 +1423,7 @@ class AutoAttendanceApp(ctk.CTk):
 
         attendees = conn.execute("""
             SELECT a.id, COALESCE(m.name, a.person_name), a.status, a.check_in_time, a.record_image,
-                   m.age, a.member_code, m.area
+                   m.age_category, a.member_code, m.area
             FROM attendance a
             LEFT JOIN members m ON a.member_code = m.member_code
             WHERE a.session_id = ?
@@ -1132,7 +1433,7 @@ class AutoAttendanceApp(ctk.CTk):
 
         # Grouping
         members_list = [a for a in attendees if a[2].lower() == 'member']
-        gospel_list = [a for a in attendees if 'gospel' in a[2].lower()]
+        gospel_list = [a for a in attendees if 'truth' in a[2].lower()]
         unknown_list = [a for a in attendees if a[2].lower() == 'unknown']
         
         p_total = len(members_list) + len(gospel_list)
@@ -1199,7 +1500,7 @@ class AutoAttendanceApp(ctk.CTk):
         stats = [
             ("PRESENT TODAY", str(p_total), "#28A745"),
             ("MEMBERS", str(len(members_list)), "#007BFF"),
-            ("GOSPEL FRIENDS", str(len(gospel_list)), "#17A2B8"),
+            ("TRUTH SEEKERS", str(len(gospel_list)), "#17A2B8"),
             ("AREA RATE%", f"{area_rate:.1f}%", "#6F42C1"),
             ("OVERALL RATE%", f"{overall_rate:.1f}%", "#FFC107"),
             ("SPECIAL RATE%", f"{special_rate:.1f}%", "#E11D48")
@@ -1252,7 +1553,7 @@ class AutoAttendanceApp(ctk.CTk):
                     ctk.CTkLabel(row, text=status.capitalize(), font=("Arial", 10, "bold"), text_color="#007BFF", fg_color="#EBF5FF", corner_radius=10, width=80, height=26).pack(side="right", padx=15)
 
         render_section("Members Present", members_list)
-        render_section("Gospel Friends Guest", gospel_list)
+        render_section("Truth Seekers Guest", gospel_list)
         render_section("Unidentified Individuals (Waiting Identification)", unknown_list)
 
         # Footer Export
@@ -1282,19 +1583,65 @@ class AutoAttendanceApp(ctk.CTk):
         if not selected_ids:
             messagebox.showwarning("Select", "No members selected for sync.")
             return
+
+        # ── Field Selection Dialog ──
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Sync Out - Data Selection")
+        dialog.geometry("380x620")
+        dialog.attributes("-topmost", True)
+        dialog.grab_set()
+
+        ctk.CTkLabel(dialog, text="📦 Sync Out Data Selection", font=("Arial", 16, "bold")).pack(pady=(20, 10))
+        ctk.CTkLabel(dialog, text="Tick the info you want to sync to other PC:", font=("Arial", 11), text_color="gray").pack(pady=(0, 15))
         
-        from tkinter import filedialog
-        path = filedialog.asksaveasfilename(
-            defaultextension=".zip",
-            filetypes=[("Zip files", "*.zip")],
-            initialfile=f"Member_Sync_{date.today().strftime('%Y%m%d')}.zip",
-            title="Export Sync File"
-        )
-        if not path: return
+        scroll = ctk.CTkScrollableFrame(dialog, fg_color="transparent")
+        scroll.pack(fill="both", expand=True, padx=20, pady=10)
+
+        fields_cfg = [
+            ("📸 Profile Photo", "photo"),
+            ("👤 Name", "name"),
+            ("📊 Age Category", "age_category"),
+            ("🏷 Member Type", "type"),
+            ("📍 Area", "area"),
+            ("📅 Date of Birth", "dob"),
+            ("💧 Baptism Date", "baptism_date"),
+            ("🏠 Address", "address"),
+            ("📧 Email", "email"),
+            ("📞 Phone", "phone"),
+            ("🕊 Holy Spirit", "has_holy_spirit"),
+            ("📝 Remark", "remark")
+        ]
         
-        ok = self.backend.bulk_export_archive(selected_ids, path)
-        if ok:
-            messagebox.showinfo("Success", f"Sync file created at:\n{path}\n\nYou can now import this file on another PC.")
+        field_vars = {}
+        for text, key in fields_cfg:
+            # Default: photo, name, age_category are pre-ticked
+            v = tk.BooleanVar(value=(key in ["photo", "name", "age_category"]))
+            cb = ctk.CTkCheckBox(scroll, text=text, variable=v, font=("Arial", 12))
+            cb.pack(pady=6, padx=20, anchor="w")
+            field_vars[key] = v
+
+        def do_export():
+            chosen_fields = [k for k, v in field_vars.items() if v.get()]
+            if not chosen_fields:
+                messagebox.showwarning("Select", "Please select at least one field to export.", parent=dialog)
+                return
+            
+            dialog.destroy()
+            
+            from tkinter import filedialog
+            path = filedialog.asksaveasfilename(
+                defaultextension=".zip",
+                filetypes=[("Zip files", "*.zip")],
+                initialfile=f"Member_Sync_{date.today().strftime('%Y%m%d')}.zip",
+                title="Export Sync File"
+            )
+            if not path: return
+            
+            ok = self.backend.bulk_export_archive(selected_ids, path, fields=chosen_fields)
+            if ok:
+                messagebox.showinfo("Success", f"Sync file created successfully!\nPath: {path}")
+
+        ctk.CTkButton(dialog, text="Proceed to Sync Out", height=40, font=("Arial", 13, "bold"), command=do_export).pack(pady=20, padx=40, fill="x")
 
     def on_bulk_sync_input(self):
         """Import members from a zip file."""
@@ -1839,6 +2186,43 @@ class AutoAttendanceApp(ctk.CTk):
         self.backup_info_lbl = ctk.CTkLabel(right, text=f"Last Backup: {self.settings.get('last_backup', 'Never')}", font=("Arial", 11), text_color="#6B7280")
         self.backup_info_lbl.pack(pady=15, anchor="w")
 
+        # ── Admin Security ──
+        ctk.CTkLabel(right, text="Admin Security", font=("Arial", 18, "bold"), text_color="#111827").pack(pady=(30, 20), anchor="w")
+        
+        ctk.CTkLabel(right, text="Update Admin Password:", font=("Arial", 12, "bold")).pack(anchor="w", pady=(5, 2))
+        self.new_pass_entry = ctk.CTkEntry(right, width=320, height=35, show="*", placeholder_text="Enter new password")
+        self.new_pass_entry.pack(pady=(0, 10), anchor="w")
+        
+        ctk.CTkButton(right, text="🔐 Update Password", fg_color="#F59E0B", hover_color="#D97706", width=320, height=38, font=("Arial", 12, "bold"), command=self.update_admin_password).pack(anchor="w", pady=(0, 20))
+
+        ctk.CTkLabel(right, text="Update Security Word (for password reset):", font=("Arial", 12, "bold")).pack(anchor="w", pady=(5, 2))
+        self.hint_word_entry = ctk.CTkEntry(right, width=320, height=35, placeholder_text="e.g. skudai")
+        self.hint_word_entry.insert(0, self.settings.get("admin_hint", "skudai"))
+        self.hint_word_entry.pack(pady=(0, 10), anchor="w")
+        
+        ctk.CTkButton(right, text="🛡 Save Security Word", fg_color="#6366F1", hover_color="#4F46E5", width=320, height=38, font=("Arial", 12, "bold"), command=self.update_admin_hint).pack(anchor="w")
+
+    def update_admin_hint(self):
+        nh = self.hint_word_entry.get().strip()
+        if not nh:
+            messagebox.showwarning("Warning", "Security word cannot be empty.")
+            return
+        if messagebox.askyesno("Confirm", "Update security word?"):
+            self.settings["admin_hint"] = nh
+            self.save_settings()
+            messagebox.showinfo("Success", "Security word updated.")
+
+    def update_admin_password(self):
+        np = self.new_pass_entry.get().strip()
+        if not np:
+            messagebox.showwarning("Warning", "Password cannot be empty.")
+            return
+        if messagebox.askyesno("Confirm", "Are you sure you want to change the admin password?"):
+            self.settings["admin_pass"] = np
+            self.save_settings()
+            messagebox.showinfo("Success", "Admin password updated.")
+            self.new_pass_entry.delete(0, 'end')
+
     def perform_backup(self):
         try:
             os.makedirs("backup", exist_ok=True)
@@ -1887,6 +2271,8 @@ class AutoAttendanceApp(ctk.CTk):
 
     def _update_settings_logo_preview(self):
         p = self.settings.get("logo_path", "")
+        if p and not os.path.isabs(p):
+            p = os.path.join(os.path.dirname(os.path.abspath(__file__)), p)
         if p and os.path.exists(p):
             try:
                 pil = Image.open(p).resize((120, 120))
@@ -1982,7 +2368,7 @@ class AutoAttendanceApp(ctk.CTk):
 
         self.cards["Present Today"].configure(text=str(s["p_total"]))
         self.cards["Members Present"].configure(text=str(s["p_members"]))
-        self.cards["Gospel Friends"].configure(text=str(s["p_gospel"]))
+        self.cards["Truth Seekers"].configure(text=str(s["p_truth"]))
         self.cards["Waiting Recognition"].configure(text=str(s["waiting"]))
         self.cards["Area Rate %"].configure(text=f"{s['area_rate']:.1f}%")
         self.cards["Overall Rate %"].configure(text=f"{s['overall_rate']:.1f}%")
@@ -2353,7 +2739,7 @@ class AutoAttendanceApp(ctk.CTk):
         right_f = ctk.CTkFrame(card, fg_color="transparent")
         right_f.pack(side="right", padx=15)
 
-        badge_colors = {"member": "#007BFF", "gospel friend": "#17A2B8", "unknown": "#DC3545"}
+        badge_colors = {"member": "#007BFF", "truth seeker": "#17A2B8", "unknown": "#DC3545"}
         b_color = badge_colors.get(m_type.lower(), "#6C757D")
         ctk.CTkLabel(right_f, text=m_type.upper(), font=("Arial", 8, "bold"), fg_color=b_color, text_color="white", corner_radius=4, width=80).pack(pady=(8, 2))
         
@@ -2531,16 +2917,38 @@ class AutoAttendanceApp(ctk.CTk):
         name_e = ctk.CTkEntry(form, width=360)
         name_e.pack(pady=3, fill="x")
 
-        ctk.CTkLabel(form, text="Type (Member / Gospel Friend)", font=("Arial", 11, "bold")).pack(anchor="w", pady=(8, 0))
+        ctk.CTkLabel(form, text="Type (Member / Truth Seeker)", font=("Arial", 11, "bold")).pack(anchor="w", pady=(8, 0))
         type_var = ctk.StringVar(value="Member")
-        type_cb = ctk.CTkComboBox(form, variable=type_var, values=["Member", "Gospel Friend"], width=360)
+        type_cb = ctk.CTkComboBox(form, variable=type_var, values=["Member", "Truth Seeker"], width=360)
         type_cb.pack(pady=3, fill="x")
 
         ctk.CTkLabel(form, text="Area", font=("Arial", 11, "bold")).pack(anchor="w", pady=(8, 0))
         area_e = ctk.CTkEntry(form, width=360, placeholder_text="e.g. Kuala Lumpur")
         area_e.pack(pady=3, fill="x")
 
-        get_dob, set_dob = self._date_picker(form, "DOB (DD-MM-YYYY)")
+        def update_age_cat_ui(dob):
+            if not dob or dob == "--": 
+                age_cat_var.set("")
+                return
+            try:
+                birth = datetime.strptime(dob, '%d-%m-%Y')
+                age = (date.today() - birth.date()).days // 365
+                if age <= 12: cat = "Child"
+                elif age <= 24: cat = "Youth"
+                elif age <= 64: cat = "Adult"
+                else: cat = "Elder"
+                age_cat_var.set(cat)
+            except: age_cat_var.set("")
+
+        get_dob, set_dob = self._date_picker(form, "DOB (DD-MM-YYYY)", on_change=update_age_cat_ui)
+
+        # Age Category Dropdown (Manual select allowed)
+        ctk.CTkLabel(form, text="Age Category", font=("Arial", 11, "bold")).pack(anchor="w", pady=(8, 0))
+        age_cat_var = ctk.StringVar(value="")
+        age_cat_cb = ctk.CTkComboBox(form, variable=age_cat_var, width=360, 
+                                      values=["", "Child", "Youth", "Adult", "Elder"])
+        age_cat_cb.pack(pady=3, fill="x")
+
         get_bap, set_bap = self._date_picker(form, "Date of Baptism (DD-MM-YYYY)")
 
         ctk.CTkLabel(form, text="Address", font=("Arial", 11, "bold")).pack(anchor="w", pady=(8, 0))
@@ -2558,6 +2966,10 @@ class AutoAttendanceApp(ctk.CTk):
         hs_var = tk.BooleanVar(value=False)
         hs_cb = ctk.CTkCheckBox(form, text="Holy Spirit Received", variable=hs_var, font=("Arial", 12, "bold"))
         hs_cb.pack(anchor="w", pady=10)
+
+        ctk.CTkLabel(form, text="Remark", font=("Arial", 11, "bold")).pack(anchor="w", pady=(8, 0))
+        remark_e = ctk.CTkTextbox(form, width=360, height=70) # ~3 lines
+        remark_e.pack(pady=3, fill="x")
 
 
         def save():
@@ -2599,6 +3011,8 @@ class AutoAttendanceApp(ctk.CTk):
                     "email": email_e.get().strip(),
                     "phone": phone_e.get().strip(),
                     "has_holy_spirit": hs_var.get(),
+                    "remark": remark_e.get("1.0", "end").strip(),
+                    "age_category": age_cat_var.get(),
                     "image_path": img_path
                 }
                 prefix = self.settings.get("member_prefix", "")
@@ -2708,70 +3122,43 @@ class AutoAttendanceApp(ctk.CTk):
             conn.close()
             self.refresh_member_table()
 
-    def _date_picker(self, parent, label, existing_val="", readonly=False, default_today=False):
-        """3-dropdown date picker. Returns a callable get() → 'DD-MM-YYYY' or ''."""
-        MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
-        days   = ["--"] + [f"{d:02d}" for d in range(1, 32)]
-        months = ["--"] + MONTHS
-        years  = ["----"] + [str(y) for y in range(1900, 2101)]
-
+    def _date_picker(self, parent, label, existing_val="", readonly=False, default_today=False, on_change=None):
+        """Wheel-style date picker. Returns a callable get() → 'DD-MM-YYYY' or ''."""
         ctk.CTkLabel(parent, text=label, font=("Arial", 12, "bold")).pack(anchor="w", pady=(10, 0))
         row = ctk.CTkFrame(parent, fg_color="transparent")
-        row.pack(anchor="w", pady=3)
+        row.pack(fill="x", pady=3)
 
-        dd_var = ctk.StringVar(value="--")
-        mm_var = ctk.StringVar(value="--")
-        yy_var = ctk.StringVar(value="----")
-
-        # Set current date as default if requested and no existing value
+        val_var = ctk.StringVar(value=existing_val)
+        
+        # If default requested and empty
         if default_today and not existing_val:
-            now = datetime.now()
-            dd_var.set(f"{now.day:02d}")
-            mm_var.set(MONTHS[now.month - 1])
-            yy_var.set(str(now.year))
+            val_var.set(datetime.now().strftime("%d-%m-%Y"))
 
-        state = "disabled" if readonly else "normal"
-        ctk.CTkComboBox(row, variable=dd_var, values=days,   width=65,  state=state).pack(side="left", padx=(0,4))
-        ctk.CTkComboBox(row, variable=mm_var, values=months, width=75,  state=state).pack(side="left", padx=(0,4))
-        ctk.CTkComboBox(row, variable=yy_var, values=years,  width=85,  state=state).pack(side="left")
+        entry = ctk.CTkEntry(row, textvariable=val_var, state="readonly", height=38)
+        entry.pack(side="left", fill="x", expand=True, padx=(0, 10))
 
-        # Pre-fill if existing value
-        if existing_val:
-            try:
-                parts = str(existing_val).split("-")
-                if len(parts) == 3:
-                    if len(parts[0]) == 2:   # DD-MM-YYYY
-                        dd_var.set(parts[0])
-                        mm_var.set(MONTHS[int(parts[1]) - 1])
-                        yy_var.set(parts[2])
-                    else:                    # YYYY-MM-DD
-                        yy_var.set(parts[0])
-                        mm_var.set(MONTHS[int(parts[1]) - 1])
-                        dd_var.set(parts[2])
-            except Exception:
-                pass
+        def open_picker():
+            if readonly: return
+            
+            def on_ok_callback(v):
+                val_var.set(v)
+                if on_change: on_change(v)
+                
+            WheelDatePicker(self, f"Select {label}", initial_val=val_var.get(), 
+                            on_ok=on_ok_callback)
+
+        btn = ctk.CTkButton(row, text="📅", width=45, height=38, fg_color="#F3F4F6", text_color="#374151", 
+                            hover_color="#E5E7EB", command=open_picker)
+        btn.pack(side="right")
+        
+        if readonly:
+            btn.configure(state="disabled")
 
         def get_val():
-            dd = dd_var.get(); mm = mm_var.get(); yy = yy_var.get()
-            if dd == "--" or mm == "--" or yy == "----":
-                return ""
-            mm_num = f"{MONTHS.index(mm)+1:02d}"
-            return f"{dd}-{mm_num}-{yy}"
+            return val_var.get()
 
         def set_val(val):
-            if not val: return
-            try:
-                parts = str(val).split("-")
-                if len(parts) == 3:
-                    if len(parts[0]) == 2:   # DD-MM-YYYY
-                        dd_var.set(parts[0])
-                        mm_var.set(MONTHS[int(parts[1]) - 1])
-                        yy_var.set(parts[2])
-                    else:                    # YYYY-MM-DD
-                        yy_var.set(parts[0])
-                        mm_var.set(MONTHS[int(parts[1]) - 1])
-                        dd_var.set(parts[2])
-            except: pass
+            val_var.set(val)
 
         return get_val, set_val
 
@@ -2798,7 +3185,8 @@ class AutoAttendanceApp(ctk.CTk):
                             "email": row[7], "phone": row[8],
                             "has_holy_spirit": row[9],
                             "image_path": row[10],
-                            "area": row[12] if len(row) > 12 else ""}
+                            "area": row[12] if len(row) > 12 else "",
+                            "remark": row[13] if len(row) > 13 else ""}
 
         # ── Profile Photo ──────────────────────────────────────────────────────
         self.dialog_img_path = existing.get("image_path", "")
@@ -2853,15 +3241,38 @@ class AutoAttendanceApp(ctk.CTk):
         ctk.CTkLabel(scroll, text="Type", font=("Arial", 12, "bold")).pack(anchor="w", pady=(10, 0))
         type_var = ctk.StringVar(value=existing.get("type", "Member") or "Member")
         type_cb  = ctk.CTkComboBox(scroll, variable=type_var,
-                                    values=["Member", "Gospel Friend"],
+                                    values=["Member", "Truth Seeker"],
                                     width=400, state="disabled" if readonly else "normal")
         type_cb.pack(pady=4)
 
+        def update_age_cat_ui(dob):
+            if not dob or dob == "--": 
+                age_cat_var.set("")
+                return
+            try:
+                birth = datetime.strptime(dob, '%d-%m-%Y')
+                age = (date.today() - birth.date()).days // 365
+                if age <= 12: cat = "Child"
+                elif age <= 24: cat = "Youth"
+                elif age <= 64: cat = "Adult"
+                else: cat = "Elder"
+                age_cat_var.set(cat)
+            except: age_cat_var.set("")
+
         # ── Date of Birth ──────────────────────────────────────────────────────
-        get_dob, set_dob = self._date_picker(scroll, "Date of Birth", existing.get("dob", ""), readonly)
+        get_dob, set_dob = self._date_picker(scroll, "Date of Birth", existing.get("dob", ""), readonly, on_change=update_age_cat_ui)
+
+        # ── Age Category ───────────────────────────────────────────────────────
+        ctk.CTkLabel(scroll, text="Age Category", font=("Arial", 12, "bold")).pack(anchor="w", pady=(10, 0))
+        age_cat_var = ctk.StringVar(value=existing.get("age_category", ""))
+        age_cat_cb = ctk.CTkComboBox(scroll, variable=age_cat_var, width=400,
+                                      values=["", "Child", "Youth", "Adult", "Elder"],
+                                      state="disabled" if readonly else "normal")
+        age_cat_cb.pack(pady=4)
 
         # ── Date of Baptism ──────────────────────────────────────────────────
-        get_bap, set_bap = self._date_picker(scroll, "Date of Baptism", existing.get("baptism_date", ""), readonly)
+        if not readonly or self.is_admin:
+            get_bap, set_bap = self._date_picker(scroll, "Date of Baptism", existing.get("baptism_date", ""), readonly)
 
         # ── Area ──────────────────────────────────────────────────────────────
         ctk.CTkLabel(scroll, text="Area", font=("Arial", 12, "bold")).pack(anchor="w", pady=(10, 0))
@@ -2872,22 +3283,31 @@ class AutoAttendanceApp(ctk.CTk):
         area_e.pack(pady=4)
 
         # ── Address / Email / Phone ────────────────────────────────────────────
-        simple_fields = [("Address", "address"), ("Email", "email"), ("Phone", "phone")]
         s_entries = {}
-        for lbl_txt, key in simple_fields:
-            ctk.CTkLabel(scroll, text=lbl_txt, font=("Arial", 12, "bold")).pack(anchor="w", pady=(10, 0))
-            e = ctk.CTkEntry(scroll, width=400)
-            e.insert(0, existing.get(key, "") or "")
-            if readonly: e.configure(state="disabled")
-            e.pack(pady=4)
-            s_entries[key] = e
+        if not readonly or self.is_admin:
+            simple_fields = [("Address", "address"), ("Email", "email"), ("Phone", "phone")]
+            for lbl_txt, key in simple_fields:
+                ctk.CTkLabel(scroll, text=lbl_txt, font=("Arial", 12, "bold")).pack(anchor="w", pady=(10, 0))
+                e = ctk.CTkEntry(scroll, width=400)
+                e.insert(0, existing.get(key, "") or "")
+                if readonly: e.configure(state="disabled")
+                e.pack(pady=4)
+                s_entries[key] = e
 
-        # ── Holy Spirit ───────────────────────────────────────────────────────
-        ctk.CTkLabel(scroll, text="Holy Spirit?", font=("Arial", 12, "bold")).pack(anchor="w", pady=(10, 0))
-        hs_var   = tk.BooleanVar(value=bool(existing.get("has_holy_spirit", False)))
-        hs_check = ctk.CTkCheckBox(scroll, text="Received Holy Spirit", variable=hs_var)
-        if readonly: hs_check.configure(state="disabled")
-        hs_check.pack(pady=4)
+            # ── Holy Spirit ───────────────────────────────────────────────────────
+            ctk.CTkLabel(scroll, text="Holy Spirit?", font=("Arial", 12, "bold")).pack(anchor="w", pady=(10, 0))
+            hs_var   = tk.BooleanVar(value=bool(existing.get("has_holy_spirit", False)))
+            hs_check = ctk.CTkCheckBox(scroll, text="Received Holy Spirit", variable=hs_var)
+            if readonly: hs_check.configure(state="disabled")
+            hs_check.pack(pady=4)
+
+        # ── Remark ────────────────────────────────────────────────────────────
+        if not readonly or self.is_admin:
+            ctk.CTkLabel(scroll, text="Remark", font=("Arial", 12, "bold")).pack(anchor="w", pady=(10, 0))
+            remark_e = ctk.CTkTextbox(scroll, width=400, height=70)
+            remark_e.insert("1.0", existing.get("remark", "") or "")
+            if readonly: remark_e.configure(state="disabled")
+            remark_e.pack(pady=4)
 
         if not readonly:
             def save():
@@ -2902,6 +3322,8 @@ class AutoAttendanceApp(ctk.CTk):
                     "phone":         s_entries["phone"].get(),
                     "has_holy_spirit": hs_var.get(),
                     "image_path":    self.dialog_img_path,
+                    "remark":        remark_e.get("1.0", "end").strip(),
+                    "age_category":  age_cat_var.get(),
                 }
                 if not data["name"]:
                     messagebox.showwarning("Missing", "Name is required.", parent=dialog)

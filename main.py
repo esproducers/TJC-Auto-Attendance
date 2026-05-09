@@ -131,6 +131,20 @@ class InsightFaceAttendance:
             check_in_time TIMESTAMP, service_date DATE,
             status TEXT DEFAULT "member")''')
 
+        c.execute('''CREATE TABLE IF NOT EXISTS org_charts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT,
+            year INTEGER,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+
+        c.execute('''CREATE TABLE IF NOT EXISTS org_chart_roles (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chart_id INTEGER,
+            parent_role_id INTEGER,
+            role_name TEXT,
+            member_code TEXT,
+            FOREIGN KEY(chart_id) REFERENCES org_charts(id))''')
+
         # Migrations
         c.execute("PRAGMA table_info(attendance)")
         cols = [r[1] for r in c.fetchall()]
@@ -143,6 +157,13 @@ class InsightFaceAttendance:
         mcols = [r[1] for r in c.fetchall()]
         if 'area' not in mcols:
             c.execute("ALTER TABLE members ADD COLUMN area TEXT DEFAULT ''")
+        if 'remark' not in mcols:
+            c.execute("ALTER TABLE members ADD COLUMN remark TEXT DEFAULT ''")
+        if 'age_category' not in mcols:
+            c.execute("ALTER TABLE members ADD COLUMN age_category TEXT DEFAULT ''")
+        
+        # One-time fix: set age_category to "" if DOB is empty
+        c.execute("UPDATE members SET age_category='' WHERE dob IS NULL OR dob='' OR dob='--'")
 
         # sessions migrations
         c.execute("PRAGMA table_info(sessions)")
@@ -185,8 +206,9 @@ class InsightFaceAttendance:
             
         return f"{prefix}-0001" if prefix else "0001"
 
-    def bulk_export_archive(self, selected_codes, out_path):
-        """Export members and their face photos into a .zip file."""
+    def bulk_export_archive(self, selected_codes, out_path, fields=None):
+        """Export members and their face photos into a .zip file. 
+           If fields is provided, only those columns (plus member_code) are exported."""
         if not selected_codes: return False
         
         temp_dir = "temp_export"
@@ -198,18 +220,28 @@ class InsightFaceAttendance:
         placeholders = ",".join(["?"] * len(selected_codes))
         members = pd.read_sql(f"SELECT * FROM members WHERE member_code IN ({placeholders})", conn, params=selected_codes)
         conn.close()
+
+        # Filter fields if requested
+        if fields:
+            # We must ALWAYS keep member_code for sync identification
+            keep = set(fields)
+            keep.add('member_code')
+            # Remove fields that don't exist in DB (like 'photo' which is handled separately)
+            db_cols = [c for c in keep if c in members.columns]
+            members = members[db_cols]
         
         # Save JSON data
         members.to_json(os.path.join(temp_dir, "members.json"), orient="records", indent=4)
         
-        # Copy photos
-        for _, m in members.iterrows():
-            code, name = m['member_code'], m['name']
-            # Find photo in registered_faces
-            for fn in os.listdir(self.face_dir):
-                if fn.startswith(f"{code}_"):
-                    shutil.copy(os.path.join(self.face_dir, fn), os.path.join(img_dir, fn))
-                    break
+        # Copy photos ONLY if 'photo' is in fields or if fields is None
+        if fields is None or 'photo' in fields:
+            for _, m in members.iterrows():
+                code = m['member_code']
+                # Find photo in registered_faces
+                for fn in os.listdir(self.face_dir):
+                    if fn.startswith(f"{code}_"):
+                        shutil.copy(os.path.join(self.face_dir, fn), os.path.join(img_dir, fn))
+                        break
         
         # Zip it up
         shutil.make_archive(out_path.replace(".zip", ""), 'zip', temp_dir)
@@ -243,19 +275,19 @@ class InsightFaceAttendance:
             # Prepare data row (column order matching sqlite init)
             vals = (code, m['name'], m['type'], m['age'], m['dob'], m['baptism_date'],
                     m['address'], m['email'], m['phone'], m['has_holy_spirit'],
-                    m['image_path'], m['registration_date'], m['area'])
+                    m['image_path'], m['registration_date'], m['area'], m.get('remark', ''))
             
             if exists:
                 c.execute("""UPDATE members SET name=?, type=?, age=?, dob=?, baptism_date=?, 
                            address=?, email=?, phone=?, has_holy_spirit=?, image_path=?, 
-                           registration_date=?, area=? WHERE member_code=?""", 
+                           registration_date=?, area=?, remark=? WHERE member_code=?""", 
                         (vals[1], vals[2], vals[3], vals[4], vals[5], vals[6], vals[7], 
-                         vals[8], vals[9], vals[10], vals[11], vals[12], code))
+                         vals[8], vals[9], vals[10], vals[11], vals[12], vals[13], code))
                 updated += 1
             else:
                 c.execute("""INSERT INTO members (member_code, name, type, age, dob, baptism_date, 
-                           address, email, phone, has_holy_spirit, image_path, registration_date, area)
-                           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""", vals)
+                           address, email, phone, has_holy_spirit, image_path, registration_date, area, remark)
+                           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", vals)
                 added += 1
         
         conn.commit()
@@ -292,29 +324,38 @@ class InsightFaceAttendance:
             except Exception:
                 pass
 
+        # Determine Age Category
+        age_cat = data.get('age_category', '').strip()
+        if dob_str and dob_str != "--":
+            if age <= 12: age_cat = "Child"
+            elif age <= 24: age_cat = "Youth"
+            elif age <= 64: age_cat = "Adult"
+            else: age_cat = "Elder"
+
         conn = sqlite3.connect(self.db_path)
         c    = conn.cursor()
         exists = c.execute("SELECT 1 FROM members WHERE member_code=?", (code,)).fetchone()
 
         if exists:
             c.execute('''UPDATE members SET name=?,type=?,age=?,dob=?,baptism_date=?,
-                         address=?,email=?,phone=?,has_holy_spirit=?,area=?,image_path=? WHERE member_code=?''',
+                         address=?,email=?,phone=?,has_holy_spirit=?,area=?,image_path=?,remark=?,age_category=? WHERE member_code=?''',
                       (data.get('name',''), data.get('type','Member'), age,
                        data.get('dob'), data.get('baptism_date'),
                        data.get('address'), data.get('email'), data.get('phone'),
                        1 if data.get('has_holy_spirit') else 0,
-                       data.get('area', '').strip(), data.get('image_path', ''), code))
+                       data.get('area', '').strip(), data.get('image_path', ''), 
+                       data.get('remark', '').strip(), age_cat, code))
         else:
             c.execute('''INSERT INTO members
                 (member_code,name,type,age,dob,baptism_date,address,email,phone,
-                 has_holy_spirit,image_path,registration_date,area)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+                 has_holy_spirit,image_path,registration_date,area,remark,age_category)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
                 (code, data.get('name',''), data.get('type','Member'), age,
                  data.get('dob'), data.get('baptism_date'),
                  data.get('address'), data.get('email'), data.get('phone'),
                  1 if data.get('has_holy_spirit') else 0,
                  data.get('image_path'), date.today(),
-                 data.get('area', '').strip()))
+                 data.get('area', '').strip(), data.get('remark', '').strip(), age_cat))
 
         conn.commit()
         conn.close()
@@ -619,7 +660,7 @@ class InsightFaceAttendance:
             df  = pd.read_sql("""
                 SELECT a.id,
                        COALESCE(m.name,        a.person_name)  AS name,
-                       COALESCE(m.age,         0)              AS age,
+                       COALESCE(m.age_category, '')    AS age,
                        COALESCE(m.member_code, a.member_code)  AS member_code,
                        COALESCE(m.type,        a.status)       AS type,
                        COALESCE(m.area,        '')             AS area,
@@ -631,9 +672,9 @@ class InsightFaceAttendance:
             """, conn, params=[sid])
 
             p_members = int((df['status'].str.lower() == 'member').sum())   if not df.empty else 0
-            p_gospel  = int(df['status'].str.lower().str.contains('gospel', na=False).sum()) if not df.empty else 0
+            p_truth   = int(df['status'].str.lower().str.contains('truth', na=False).sum()) if not df.empty else 0
             waiting   = int((df['status'].str.lower() == 'unknown').sum())  if not df.empty else 0
-            present   = p_members + p_gospel
+            present   = p_members + p_truth
 
             # Area rate: people from default area present / total area members
             if da and not df.empty:
@@ -643,7 +684,7 @@ class InsightFaceAttendance:
             area_rate    = (area_present  / area_total    * 100) if area_total    > 0 else 0
             overall_rate = (present       / total_members * 100) if total_members > 0 else 0
         else:
-            present = p_members = p_gospel = waiting = area_present = 0
+            present = p_members = p_truth = waiting = area_present = 0
             area_rate = overall_rate = 0.0
             df = pd.DataFrame()
 
@@ -651,7 +692,7 @@ class InsightFaceAttendance:
         return {
             "p_total":      present,
             "p_members":    p_members,
-            "p_gospel":     p_gospel,
+            "p_truth":      p_truth,
             "waiting":      waiting,
             "area_rate":    area_rate,
             "overall_rate": overall_rate,
