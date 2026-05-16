@@ -794,8 +794,8 @@ class InsightFaceAttendance:
         conn.close()
         return rows
 
-    def get_periodical_stats(self, period_type='weekly', default_area=None):
-        """Aggregate stats for Friday, Saturday, and Combined seminars."""
+    def get_periodical_stats(self, period_type='weekly', seminar_filter='All Sessions', default_area=None):
+        """Aggregate stats for seminars by week, month, or year."""
         import sqlite3
         import pandas as pd
         conn = sqlite3.connect(self.db_path)
@@ -815,75 +815,119 @@ class InsightFaceAttendance:
         else:
             date_fmt = '%Y'
             
+        # Determine filter clause
+        if seminar_filter == 'All Sessions':
+            where_clause = ""
+        else:
+            where_clause = f"WHERE s.seminar_type = '{seminar_filter}'"
+            
         query = f"""
             SELECT 
                 strftime('{date_fmt}', s.date) as period,
                 
-                -- Friday
-                COUNT(CASE WHEN s.seminar_type = 'Friday Seminar' THEN a.id END) as fri_present,
-                SUM(CASE WHEN s.seminar_type = 'Friday Seminar' AND m.title = 'Brother' THEN 1 ELSE 0 END) as fri_bro,
-                SUM(CASE WHEN s.seminar_type = 'Friday Seminar' AND m.title = 'Sister' THEN 1 ELSE 0 END) as fri_sis,
-                SUM(CASE WHEN s.seminar_type = 'Friday Seminar' AND m.type = 'Member' THEN 1 ELSE 0 END) as fri_mbr,
-                SUM(CASE WHEN s.seminar_type = 'Friday Seminar' AND m.type LIKE '%Truth%' THEN 1 ELSE 0 END) as fri_ts,
-                SUM(CASE WHEN s.seminar_type = 'Friday Seminar' AND m.type = 'Member' AND LOWER(TRIM(m.area)) = ? THEN 1 ELSE 0 END) as fri_area_present,
-                COUNT(DISTINCT CASE WHEN s.seminar_type = 'Friday Seminar' THEN s.id END) as fri_sess_count,
-
-                -- Saturday
-                COUNT(CASE WHEN s.seminar_type = 'Saturday Seminar' THEN a.id END) as sat_present,
-                SUM(CASE WHEN s.seminar_type = 'Saturday Seminar' AND m.title = 'Brother' THEN 1 ELSE 0 END) as sat_bro,
-                SUM(CASE WHEN s.seminar_type = 'Saturday Seminar' AND m.title = 'Sister' THEN 1 ELSE 0 END) as sat_sis,
-                SUM(CASE WHEN s.seminar_type = 'Saturday Seminar' AND m.type = 'Member' THEN 1 ELSE 0 END) as sat_mbr,
-                SUM(CASE WHEN s.seminar_type = 'Saturday Seminar' AND m.type LIKE '%Truth%' THEN 1 ELSE 0 END) as sat_ts,
-                SUM(CASE WHEN s.seminar_type = 'Saturday Seminar' AND m.type = 'Member' AND LOWER(TRIM(m.area)) = ? THEN 1 ELSE 0 END) as sat_area_present,
-                COUNT(DISTINCT CASE WHEN s.seminar_type = 'Saturday Seminar' THEN s.id END) as sat_sess_count,
-
-                -- Combined (Totals)
-                COUNT(a.id) as tot_present,
-                SUM(CASE WHEN m.title = 'Brother' THEN 1 ELSE 0 END) as tot_bro,
-                SUM(CASE WHEN m.title = 'Sister' THEN 1 ELSE 0 END) as tot_sis,
-                SUM(CASE WHEN m.type = 'Member' THEN 1 ELSE 0 END) as tot_mbr,
-                SUM(CASE WHEN m.type LIKE '%Truth%' THEN 1 ELSE 0 END) as tot_ts,
-                SUM(CASE WHEN m.type = 'Member' AND LOWER(TRIM(m.area)) = ? THEN 1 ELSE 0 END) as tot_area_present,
-                COUNT(DISTINCT s.id) as tot_sess_count
+                -- Stats
+                COUNT(a.id) as present,
+                SUM(CASE WHEN m.title = 'Brother' THEN 1 ELSE 0 END) as bro,
+                SUM(CASE WHEN m.title = 'Sister' THEN 1 ELSE 0 END) as sis,
+                SUM(CASE WHEN m.type = 'Member' THEN 1 ELSE 0 END) as mbr,
+                SUM(CASE WHEN m.type LIKE '%Truth%' THEN 1 ELSE 0 END) as ts,
+                SUM(CASE WHEN m.type = 'Member' AND LOWER(TRIM(m.area)) = ? THEN 1 ELSE 0 END) as area_present,
+                COUNT(DISTINCT s.id) as sess_count
 
             FROM sessions s
             JOIN attendance a ON a.session_id = s.id
             LEFT JOIN members m ON a.member_code = m.member_code
-            WHERE s.seminar_type IN ('Friday Seminar', 'Saturday Seminar')
+            {where_clause}
             GROUP BY period
             ORDER BY period DESC
         """
         
-        df = pd.read_sql(query, conn, params=[da, da, da])
+        df = pd.read_sql(query, conn, params=[da])
         
         if not df.empty:
             # Format Period strings for readability
             def format_p(p):
                 try:
                     if period_type == 'weekly':
-                        # p is like '2026-W20'
                         y, w = p.split('-W')
                         return f"Week {w}, {y}"
                     elif period_type == 'monthly':
-                        # p is like '2026-05'
                         dt = datetime.strptime(p, '%Y-%m')
                         return dt.strftime('%b %Y').upper()
                     return p
                 except: return p
-                
             df['period'] = df['period'].apply(format_p)
 
-            # Rates for Friday
-            df['fri_overall_rate'] = (df['fri_mbr'] / (total_sys_m * df['fri_sess_count'].replace(0, 1)) * 100).fillna(0)
-            df['fri_area_rate'] = (df['fri_area_present'] / (area_m_total * df['fri_sess_count'].replace(0, 1)) * 100).fillna(0)
+            # Rates
+            df['overall_rate'] = (df['mbr'] / (total_sys_m * df['sess_count'].replace(0, 1)) * 100).fillna(0)
+            df['area_rate'] = (df['area_present'] / (area_m_total * df['sess_count'].replace(0, 1)) * 100).fillna(0)
             
-            # Rates for Saturday
-            df['sat_overall_rate'] = (df['sat_mbr'] / (total_sys_m * df['sat_sess_count'].replace(0, 1)) * 100).fillna(0)
-            df['sat_area_rate'] = (df['sat_area_present'] / (area_m_total * df['sat_sess_count'].replace(0, 1)) * 100).fillna(0)
-            
-            # Rates for Combined
-            df['tot_overall_rate'] = (df['tot_mbr'] / (total_sys_m * df['tot_sess_count']) * 100).fillna(0)
-            df['tot_area_rate'] = (df['tot_area_present'] / (area_m_total * df['tot_sess_count']) * 100).fillna(0)
+        conn.close()
+        return df
+
+    def get_detailed_period_sessions(self, period_str, period_type='monthly', seminar_filter='All Sessions', default_area=None):
+        """Fetch all individual sessions within a specific period (e.g., 'May 2026')."""
+        import sqlite3
+        import pandas as pd
+        conn = sqlite3.connect(self.db_path)
+        
+        total_sys_m = conn.execute("SELECT COUNT(*) FROM members WHERE type='Member'").fetchone()[0]
+        if default_area:
+            da = default_area.strip().lower()
+            area_m_total = conn.execute("SELECT COUNT(*) FROM members WHERE type='Member' AND LOWER(TRIM(area))=?", (da,)).fetchone()[0]
+        else:
+            da = None
+            area_m_total = total_sys_m
+
+        # Convert Period String back to SQL friendly match
+        if period_type == 'weekly':
+            try:
+                import re
+                match = re.search(r'Week (\d+), (\d+)', period_str)
+                w, y = match.groups()
+                sql_period = f"{y}-W{int(w):02d}"
+                date_fmt = '%Y-W%W'
+            except: return pd.DataFrame()
+        elif period_type == 'monthly':
+            try:
+                dt = datetime.strptime(period_str, '%b %Y')
+                sql_period = dt.strftime('%Y-%m')
+                date_fmt = '%Y-%m'
+            except: return pd.DataFrame()
+        else:
+            sql_period = period_str
+            date_fmt = '%Y'
+
+        if seminar_filter == 'All Sessions':
+            where_clause = f"WHERE strftime('{date_fmt}', s.date) = ?"
+        else:
+            s_filter = "Other" if seminar_filter == "Other Sessions" else seminar_filter
+            where_clause = f"WHERE s.seminar_type = '{s_filter}' AND strftime('{date_fmt}', s.date) = ?"
+
+        query = f"""
+            SELECT 
+                s.date as Date,
+                s.seminar_type as Type,
+                COUNT(a.id) as Present,
+                SUM(CASE WHEN m.title = 'Brother' THEN 1 ELSE 0 END) as Bro,
+                SUM(CASE WHEN m.title = 'Sister' THEN 1 ELSE 0 END) as Sis,
+                SUM(CASE WHEN m.type = 'Member' THEN 1 ELSE 0 END) as Mbr,
+                SUM(CASE WHEN m.type LIKE '%Truth%' THEN 1 ELSE 0 END) as TS,
+                SUM(CASE WHEN m.type = 'Member' AND LOWER(TRIM(m.area)) = ? THEN 1 ELSE 0 END) as Area_Present
+            FROM sessions s
+            JOIN attendance a ON a.session_id = s.id
+            LEFT JOIN members m ON a.member_code = m.member_code
+            {where_clause}
+            GROUP BY s.id
+            ORDER BY s.date ASC
+        """
+        
+        df = pd.read_sql(query, conn, params=[da, sql_period])
+        
+        if not df.empty:
+            df['Area_Rate%'] = (df['Area_Present'] / (area_m_total if area_m_total > 0 else 1) * 100).fillna(0).round(1)
+            df['Overall_Rate%'] = (df['Mbr'] / (total_sys_m if total_sys_m > 0 else 1) * 100).fillna(0).round(1)
+            df = df.drop(columns=['Area_Present'])
             
         conn.close()
         return df

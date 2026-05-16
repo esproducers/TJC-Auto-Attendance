@@ -9,6 +9,13 @@ class ReportGenerator:
     def __init__(self, db_path="database/attendance.db"):
         self.db_path = db_path
         os.makedirs("reports", exist_ok=True)
+        self.settings = {}
+        if os.path.exists("settings.json"):
+            try:
+                import json
+                with open("settings.json", "r") as f:
+                    self.settings = json.load(f)
+            except: pass
 
     def _get_session_stats(self, session_id, default_area=None):
         conn = sqlite3.connect(self.db_path)
@@ -624,8 +631,15 @@ class ReportGenerator:
         pdf.output(out_path)
         return out_path
 
-    def generate_periodical_report(self, period_type='weekly', default_area=None):
-        """Generates an Excel report for Friday/Saturday seminars grouped by week, month, or year."""
+    def get_downloads_path(self, filename):
+        downloads_path = os.path.join(os.path.expanduser("~"), "Downloads")
+        if not os.path.exists(downloads_path):
+            os.makedirs("reports", exist_ok=True)
+            return os.path.join("reports", filename)
+        return os.path.join(downloads_path, filename)
+
+    def generate_periodical_excel(self, period_type='weekly', seminar_filter='All Sessions', default_area=None, custom_date=None):
+        """Generates an Excel report for seminars grouped by week, month, or year."""
         import pandas as pd
         import sqlite3
         conn = sqlite3.connect(self.db_path)
@@ -645,52 +659,40 @@ class ReportGenerator:
         else:
             date_fmt = '%Y'
             
+        if seminar_filter == 'All Sessions':
+            where_clause = ""
+        else:
+            s_filter = "Other" if seminar_filter == "Other Sessions" else seminar_filter
+            where_clause = f"WHERE s.seminar_type = '{s_filter}'"
+            
+        if custom_date:
+            if where_clause: where_clause += f" AND strftime('{date_fmt}', s.date) = '{custom_date}'"
+            else: where_clause = f"WHERE strftime('{date_fmt}', s.date) = '{custom_date}'"
+
         query = f"""
             SELECT 
                 strftime('{date_fmt}', s.date) as Period,
-                
-                -- Friday
-                COUNT(CASE WHEN s.seminar_type = 'Friday Seminar' THEN a.id END) as Fri_Present,
-                SUM(CASE WHEN s.seminar_type = 'Friday Seminar' AND m.title = 'Brother' THEN 1 ELSE 0 END) as Fri_Bro,
-                SUM(CASE WHEN s.seminar_type = 'Friday Seminar' AND m.title = 'Sister' THEN 1 ELSE 0 END) as Fri_Sis,
-                SUM(CASE WHEN s.seminar_type = 'Friday Seminar' AND m.type = 'Member' THEN 1 ELSE 0 END) as Fri_Mbr,
-                SUM(CASE WHEN s.seminar_type = 'Friday Seminar' AND m.type LIKE '%Truth%' THEN 1 ELSE 0 END) as Fri_TS,
-                SUM(CASE WHEN s.seminar_type = 'Friday Seminar' AND m.type = 'Member' AND LOWER(TRIM(m.area)) = ? THEN 1 ELSE 0 END) as Fri_Area_Present,
-                COUNT(DISTINCT CASE WHEN s.seminar_type = 'Friday Seminar' THEN s.id END) as Fri_Sess_Count,
-
-                -- Saturday
-                COUNT(CASE WHEN s.seminar_type = 'Saturday Seminar' THEN a.id END) as Sat_Present,
-                SUM(CASE WHEN s.seminar_type = 'Saturday Seminar' AND m.title = 'Brother' THEN 1 ELSE 0 END) as Sat_Bro,
-                SUM(CASE WHEN s.seminar_type = 'Saturday Seminar' AND m.title = 'Sister' THEN 1 ELSE 0 END) as Sat_Sis,
-                SUM(CASE WHEN s.seminar_type = 'Saturday Seminar' AND m.type = 'Member' THEN 1 ELSE 0 END) as Sat_Mbr,
-                SUM(CASE WHEN s.seminar_type = 'Saturday Seminar' AND m.type LIKE '%Truth%' THEN 1 ELSE 0 END) as Sat_TS,
-                SUM(CASE WHEN s.seminar_type = 'Saturday Seminar' AND m.type = 'Member' AND LOWER(TRIM(m.area)) = ? THEN 1 ELSE 0 END) as Sat_Area_Present,
-                COUNT(DISTINCT CASE WHEN s.seminar_type = 'Saturday Seminar' THEN s.id END) as Sat_Sess_Count,
-
-                -- Combined
-                COUNT(a.id) as Tot_Present,
-                SUM(CASE WHEN m.title = 'Brother' THEN 1 ELSE 0 END) as Tot_Bro,
-                SUM(CASE WHEN m.title = 'Sister' THEN 1 ELSE 0 END) as Tot_Sis,
-                SUM(CASE WHEN m.type = 'Member' THEN 1 ELSE 0 END) as Tot_Mbr,
-                SUM(CASE WHEN m.type LIKE '%Truth%' THEN 1 ELSE 0 END) as Tot_TS,
-                SUM(CASE WHEN m.type = 'Member' AND LOWER(TRIM(m.area)) = ? THEN 1 ELSE 0 END) as Tot_Area_Present,
-                COUNT(DISTINCT s.id) as Tot_Sess_Count
-
+                COUNT(a.id) as Present,
+                SUM(CASE WHEN m.title = 'Brother' THEN 1 ELSE 0 END) as Bro,
+                SUM(CASE WHEN m.title = 'Sister' THEN 1 ELSE 0 END) as Sis,
+                SUM(CASE WHEN m.type = 'Member' THEN 1 ELSE 0 END) as Mbr,
+                SUM(CASE WHEN m.type LIKE '%Truth%' THEN 1 ELSE 0 END) as TS,
+                SUM(CASE WHEN m.type = 'Member' AND LOWER(TRIM(m.area)) = ? THEN 1 ELSE 0 END) as Area_Present,
+                COUNT(DISTINCT s.id) as Sess_Count
             FROM sessions s
             JOIN attendance a ON a.session_id = s.id
             LEFT JOIN members m ON a.member_code = m.member_code
-            WHERE s.seminar_type IN ('Friday Seminar', 'Saturday Seminar')
+            {where_clause}
             GROUP BY Period
             ORDER BY Period DESC
         """
         
-        df = pd.read_sql(query, conn, params=[da, da, da])
+        df = pd.read_sql(query, conn, params=[da])
         conn.close()
 
-        if df.empty:
-            return None
+        if df.empty: return None
 
-        # Format Period strings for readability
+        # Format Period
         def format_p(p):
             try:
                 if period_type == 'weekly':
@@ -703,22 +705,163 @@ class ReportGenerator:
             except: return p
         df['Period'] = df['Period'].apply(format_p)
 
-        # Add rates and formatting
-        df['Fri_Area_Rate%'] = (df['Fri_Area_Present'] / (area_m_total * df['Fri_Sess_Count'].replace(0, 1)) * 100).fillna(0).round(1)
-        df['Fri_Overall_Rate%'] = (df['Fri_Mbr'] / (total_sys_m * df['Fri_Sess_Count'].replace(0, 1)) * 100).fillna(0).round(1)
-        
-        df['Sat_Area_Rate%'] = (df['Sat_Area_Present'] / (area_m_total * df['Sat_Sess_Count'].replace(0, 1)) * 100).fillna(0).round(1)
-        df['Sat_Overall_Rate%'] = (df['Sat_Mbr'] / (total_sys_m * df['Sat_Sess_Count'].replace(0, 1)) * 100).fillna(0).round(1)
-        
-        df['Tot_Area_Rate%'] = (df['Tot_Area_Present'] / (area_m_total * df['Tot_Sess_Count']) * 100).fillna(0).round(1)
-        df['Tot_Overall_Rate%'] = (df['Tot_Mbr'] / (total_sys_m * df['Tot_Sess_Count']) * 100).fillna(0).round(1)
+        df['Area_Rate%'] = (df['Area_Present'] / (area_m_total * df['Sess_Count'].replace(0, 1)) * 100).fillna(0).round(1)
+        df['Overall_Rate%'] = (df['Mbr'] / (total_sys_m * df['Sess_Count'].replace(0, 1)) * 100).fillna(0).round(1)
 
-        # Cleanup internal helper columns
-        df = df.drop(columns=['Fri_Sess_Count', 'Sat_Sess_Count', 'Tot_Sess_Count', 
-                             'Fri_Area_Present', 'Sat_Area_Present', 'Tot_Area_Present'])
+        # Add Average Row
+        if not df.empty:
+            avgs = df.mean(numeric_only=True).round(1)
+            avg_row = {col: "" for col in df.columns}
+            avg_row['Period'] = "AVERAGE"
+            for col in avgs.index:
+                avg_row[col] = avgs[col]
+            df = pd.concat([df, pd.DataFrame([avg_row])], ignore_index=True)
 
-        # Save to file
+        # Output to Downloads
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"reports/Seminar_{period_type.capitalize()}_Report_{timestamp}.xlsx"
-        df.to_excel(filename, index=False)
-        return filename
+        filename = f"Periodical_{seminar_filter.replace(' ', '_')}_{period_type}_{timestamp}.xlsx"
+        p = self.get_downloads_path(filename)
+        df.to_excel(p, index=False)
+        return p
+
+    def generate_periodical_pdf(self, period_type='weekly', seminar_filter='All Sessions', default_area=None):
+        """Generates a professional PDF report for seminars grouped by week, month, or year."""
+        import pandas as pd
+        df_path = self.generate_periodical_excel(period_type, seminar_filter, default_area)
+        if not df_path: return None
+        
+        df = pd.read_excel(df_path)
+        
+        pdf = FPDF('L', 'mm', 'A4')
+        pdf.add_page()
+        
+        # Professional Header
+        self._add_standard_header(pdf, self.settings)
+        pdf.ln(10)
+        
+        pdf.set_font("Arial", 'B', 16)
+        title = f"{seminar_filter.upper()} - {period_type.upper()} ATTENDANCE REPORT"
+        pdf.cell(0, 10, title, ln=True, align='C')
+        pdf.set_font("Arial", 'I', 10)
+        pdf.cell(0, 8, f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", ln=True, align='C')
+        pdf.ln(10)
+
+        # Header Table
+        pdf.set_fill_color(240, 240, 240)
+        pdf.set_font("Arial", 'B', 10)
+        cols = ["Period", "Present", "Bro/Sis", "Mbr/TS", "Area Rate", "Overall Rate"]
+        widths = [60, 35, 45, 45, 40, 40]
+        for i, c in enumerate(cols):
+            pdf.cell(widths[i], 12, c, border=1, fill=True, align='C')
+        pdf.ln()
+
+        # Data Rows
+        pdf.set_font("Arial", '', 10)
+        for _, row in df.iterrows():
+            is_avg = row['Period'] == "AVERAGE"
+            if is_avg:
+                pdf.set_font("Arial", 'B', 10)
+                pdf.set_fill_color(245, 245, 245)
+                fill = True
+            else:
+                pdf.set_font("Arial", '', 10)
+                fill = False
+
+            pdf.cell(widths[0], 10, str(row['Period']), border=1, fill=fill, align='C')
+            
+            p_val = f"{row['Present']:.1f}" if is_avg else str(int(row['Present']))
+            pdf.cell(widths[1], 10, p_val, border=1, fill=fill, align='C')
+            
+            bs = f"{row['Bro']:.1f} / {row['Sis']:.1f}" if is_avg else f"{int(row['Bro'])} / {int(row['Sis'])}"
+            pdf.cell(widths[2], 10, bs, border=1, fill=fill, align='C')
+            
+            mt = f"{row['Mbr']:.1f} / {row['TS']:.1f}" if is_avg else f"{int(row['Mbr'])} / {int(row['TS'])}"
+            pdf.cell(widths[3], 10, mt, border=1, fill=fill, align='C')
+            
+            pdf.cell(widths[4], 10, f"{row['Area_Rate%']:.1f}%", border=1, fill=fill, align='C')
+            pdf.cell(widths[5], 10, f"{row['Overall_Rate%']:.1f}%", border=1, fill=fill, align='C')
+            pdf.ln()
+
+        out_path = df_path.replace(".xlsx", ".pdf")
+        pdf.output(out_path)
+        return out_path
+
+    def generate_individual_period_report(self, period_str, period_type, seminar_filter, default_area, kind):
+        """Generates a detailed report for every session within a specific period (e.g. Feb 2026)."""
+        import pandas as pd
+        from main import InsightFaceAttendance
+        backend = InsightFaceAttendance()
+        df = backend.get_detailed_period_sessions(period_str, period_type, seminar_filter, default_area)
+        
+        if df.empty: return None
+        
+        # Add Average Row
+        avgs = df.mean(numeric_only=True).round(1)
+        avg_row = {col: "" for col in df.columns}
+        avg_row['Date'] = "AVERAGE"
+        for col in avgs.index:
+            avg_row[col] = avgs[col]
+        df = pd.concat([df, pd.DataFrame([avg_row])], ignore_index=True)
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename_base = f"Detailed_{period_str.replace(' ', '_')}_{timestamp}"
+        
+        if kind == 'excel':
+            p = self.get_downloads_path(filename_base + ".xlsx")
+            df.to_excel(p, index=False)
+            return p
+        else:
+            p = self.get_downloads_path(filename_base + ".pdf")
+            pdf = FPDF('L', 'mm', 'A4')
+            pdf.add_page()
+            
+            # Professional Header
+            self._add_standard_header(pdf, self.settings)
+            pdf.ln(10)
+            
+            pdf.set_font("Arial", 'B', 16)
+            pdf.cell(0, 10, f"DETAILED ATTENDANCE: {period_str}", ln=True, align='C')
+            pdf.set_font("Arial", 'B', 12)
+            pdf.cell(0, 8, f"{seminar_filter.upper()}", ln=True, align='C')
+            pdf.set_font("Arial", 'I', 10)
+            pdf.cell(0, 8, f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", ln=True, align='C')
+            pdf.ln(10)
+
+            cols = ["Date", "Type", "Present", "Bro/Sis", "Mbr/TS", "Area %", "Overall %"]
+            widths = [45, 55, 30, 45, 45, 30, 30]
+            
+            pdf.set_fill_color(240, 240, 240)
+            pdf.set_font("Arial", 'B', 10)
+            for i, c in enumerate(cols):
+                pdf.cell(widths[i], 12, c, border=1, fill=True, align='C')
+            pdf.ln()
+
+            pdf.set_font("Arial", '', 10)
+            for _, row in df.iterrows():
+                is_avg = row['Date'] == "AVERAGE"
+                if is_avg:
+                    pdf.set_font("Arial", 'B', 10)
+                    pdf.set_fill_color(245, 245, 245)
+                    fill = True
+                else:
+                    pdf.set_font("Arial", '', 10)
+                    fill = False
+
+                pdf.cell(widths[0], 10, str(row['Date']), border=1, fill=fill, align='C')
+                pdf.cell(widths[1], 10, str(row['Type']), border=1, fill=fill, align='C')
+                
+                pres = f"{row['Present']:.1f}" if is_avg else str(int(row['Present']))
+                pdf.cell(widths[2], 10, pres, border=1, fill=fill, align='C')
+                
+                bs = f"{row['Bro']:.1f} / {row['Sis']:.1f}" if is_avg else f"{int(row['Bro'])} / {int(row['Sis'])}"
+                pdf.cell(widths[3], 10, bs, border=1, fill=fill, align='C')
+                
+                mt = f"{row['Mbr']:.1f} / {row['TS']:.1f}" if is_avg else f"{int(row['Mbr'])} / {int(row['TS'])}"
+                pdf.cell(widths[4], 10, mt, border=1, fill=fill, align='C')
+                
+                pdf.cell(widths[5], 10, f"{row['Area_Rate%']:.1f}%", border=1, fill=fill, align='C')
+                pdf.cell(widths[6], 10, f"{row['Overall_Rate%']:.1f}%", border=1, fill=fill, align='C')
+                pdf.ln()
+
+            pdf.output(p)
+            return p

@@ -524,13 +524,14 @@ class AutoAttendanceApp(ctk.CTk):
             json.dump(self.settings, f, indent=4)
 
     def check_auto_periodical_reports(self):
-        """Automatically generates Excel reports on specific milestones (1st day of week/month/year)."""
+        """Automatically generates Excel reports for the PREVIOUS period on milestone days."""
+        from datetime import timedelta
         today = date.today()
         last_check = self.settings.get("last_auto_report_check", "")
         if last_check == str(today):
             return
             
-        # Milestones: Monday (0), 1st of Month, 1st of Year
+        yesterday = today - timedelta(days=1)
         is_monday = today.weekday() == 0
         is_1st_month = today.day == 1
         is_1st_year = today.month == 1 and today.day == 1
@@ -542,17 +543,18 @@ class AutoAttendanceApp(ctk.CTk):
                 def_area = self.settings.get("default_area", "")
                 
                 if is_1st_year:
-                    rg.generate_periodical_report('yearly', default_area=def_area)
+                    prev_year = yesterday.strftime('%Y')
+                    rg.generate_periodical_excel('yearly', 'All Sessions', def_area, custom_date=prev_year)
                 if is_1st_month:
-                    rg.generate_periodical_report('monthly', default_area=def_area)
+                    prev_month = yesterday.strftime('%Y-%m')
+                    rg.generate_periodical_excel('monthly', 'All Sessions', def_area, custom_date=prev_month)
                 if is_monday:
-                    rg.generate_periodical_report('weekly', default_area=def_area)
+                    prev_week = yesterday.strftime('%Y-W%W')
+                    rg.generate_periodical_excel('weekly', 'All Sessions', def_area, custom_date=prev_week)
                 
-                # We don't show a popup to avoid bothering the user on startup,
-                # but the files will be in the 'reports' folder.
-                print(f"[AUTO-REPORT] Periodical reports generated for {today}")
+                print(f"[AUTO-REPORT] Periodical reports generated for previous period of {today}")
             except Exception as e:
-                print(f"[AUTO-REPORT] Error: {e}")
+                print(f"[AUTO-REPORT] Auto-Report Error: {e}")
 
         self.settings["last_auto_report_check"] = str(today)
         self.save_settings()
@@ -1915,11 +1917,20 @@ class AutoAttendanceApp(ctk.CTk):
         type_frame = ctk.CTkFrame(f, fg_color="transparent")
         type_frame.pack(fill="x", padx=30, pady=(0, 10))
         
-        self.report_type_var = ctk.StringVar(value="Combined Total")
-        type_sel = ctk.CTkSegmentedButton(type_frame, values=["Friday Seminar", "Saturday Seminar", "Combined Total"], 
+        self.report_type_var = ctk.StringVar(value="All Sessions")
+        type_sel = ctk.CTkSegmentedButton(type_frame, values=["Friday Seminar", "Saturday Seminar", "Other Sessions", "All Sessions"], 
                                          variable=self.report_type_var, height=40, font=("Arial", 13, "bold"),
                                          command=lambda _: self.refresh_annually_report())
-        type_sel.pack(fill="x")
+        type_sel.pack(side="left", fill="x", expand=True)
+
+        # Export Buttons
+        btn_frame = ctk.CTkFrame(type_frame, fg_color="transparent")
+        btn_frame.pack(side="right", padx=(20, 0))
+        
+        ctk.CTkButton(btn_frame, text="📊 Excel", width=100, fg_color="#28A745", hover_color="#218838",
+                      command=lambda: self.export_annually_report("excel")).pack(side="left", padx=5)
+        ctk.CTkButton(btn_frame, text="📄 PDF", width=100, fg_color="#DC3545", hover_color="#C82333",
+                      command=lambda: self.export_annually_report("pdf")).pack(side="left", padx=5)
 
         # Sub Level: Period Selection
         period_frame = ctk.CTkFrame(f, fg_color="transparent")
@@ -1943,66 +1954,114 @@ class AutoAttendanceApp(ctk.CTk):
         
         p_type = self.report_period_var.get().lower()
         s_type = self.report_type_var.get()
+        if s_type == "Other Sessions": s_type = "Other"
         
         def_area = self.settings.get("default_area", "").strip()
-        df = self.backend.get_periodical_stats(p_type, default_area=def_area)
+        df = self.backend.get_periodical_stats(p_type, seminar_filter=s_type, default_area=def_area)
         
         # Table Header
         table_f = ctk.CTkScrollableFrame(self.annually_table_container, fg_color="#FFFFFF", corner_radius=10, border_width=1, border_color="#E5E7EB")
         table_f.pack(fill="both", expand=True)
         
-        headers = ["PERIOD", "PRESENT COUNT", "BROTHER / SISTER", "MEMBER / TRUTH SEEKER", "AREA RATE %", "OVERALL RATE %"]
+        headers = ["PERIOD", "PRESENT COUNT", "BROTHER / SISTER", "MEMBER / TRUTH SEEKER", "AREA RATE %", "OVERALL RATE %", "DOWNLOAD"]
         h_f = ctk.CTkFrame(table_f, fg_color="#F9FAFB", height=45)
         h_f.pack(fill="x", pady=(0, 5))
         for i, h in enumerate(headers):
-            relx = 0.05 if i == 0 else (0.2 + (i-1) * 0.16)
+            relx = 0.05 if i == 0 else (0.16 + (i-1) * 0.14)
             ctk.CTkLabel(h_f, text=h, font=("Arial", 10, "bold"), text_color="#4B5563").place(relx=relx, rely=0.5, anchor="w")
         
         if df.empty:
-            ctk.CTkLabel(table_f, text="No seminar records found for the selected filters.", font=("Arial", 13), pady=40).pack()
+            ctk.CTkLabel(table_f, text="No records found for the selected filters.", font=("Arial", 13), pady=40).pack()
             return
 
-        # Map display columns based on selected Seminar Type
-        prefix = "fri" if s_type == "Friday Seminar" else ("sat" if s_type == "Saturday Seminar" else "tot")
+        # Map display columns
         color = "#2563EB" if s_type == "Friday Seminar" else ("#D97706" if s_type == "Saturday Seminar" else "#059669")
 
         # Data Rows
         for _, row in df.iterrows():
-            if row[f'{prefix}_present'] == 0: continue # Skip periods with no data for this specific type
+            if row['present'] == 0: continue
+            p_val = str(row['period'])
 
-            r_f = ctk.CTkFrame(table_f, fg_color="transparent", height=40)
+            r_f = ctk.CTkFrame(table_f, fg_color="transparent", height=45)
             r_f.pack(fill="x")
             
-            ctk.CTkLabel(r_f, text=str(row['period']), font=("Arial", 12, "bold"), text_color="#111827").place(relx=0.05, rely=0.5, anchor="w")
-            ctk.CTkLabel(r_f, text=str(int(row[f'{prefix}_present'])), font=("Arial", 12)).place(relx=0.2, rely=0.5, anchor="w")
-            ctk.CTkLabel(r_f, text=f"{int(row[f'{prefix}_bro'])} / {int(row[f'{prefix}_sis'])}", font=("Arial", 12)).place(relx=0.36, rely=0.5, anchor="w")
-            ctk.CTkLabel(r_f, text=f"{int(row[f'{prefix}_mbr'])} / {int(row[f'{prefix}_ts'])}", font=("Arial", 12)).place(relx=0.52, rely=0.5, anchor="w")
-            ctk.CTkLabel(r_f, text=f"{row[f'{prefix}_area_rate']:.1f}%", font=("Arial", 12, "bold"), text_color="#2563EB").place(relx=0.68, rely=0.5, anchor="w")
-            ctk.CTkLabel(r_f, text=f"{row[f'{prefix}_overall_rate']:.1f}%", font=("Arial", 12, "bold"), text_color=color).place(relx=0.84, rely=0.5, anchor="w")
+            ctk.CTkLabel(r_f, text=p_val, font=("Arial", 12, "bold"), text_color="#111827").place(relx=0.05, rely=0.5, anchor="w")
+            ctk.CTkLabel(r_f, text=str(int(row['present'])), font=("Arial", 12)).place(relx=0.16, rely=0.5, anchor="w")
+            ctk.CTkLabel(r_f, text=f"{int(row['bro'])} / {int(row['sis'])}", font=("Arial", 12)).place(relx=0.30, rely=0.5, anchor="w")
+            ctk.CTkLabel(r_f, text=f"{int(row['mbr'])} / {int(row['ts'])}", font=("Arial", 12)).place(relx=0.44, rely=0.5, anchor="w")
+            ctk.CTkLabel(r_f, text=f"{row['area_rate']:.1f}%", font=("Arial", 12, "bold"), text_color="#2563EB").place(relx=0.58, rely=0.5, anchor="w")
+            ctk.CTkLabel(r_f, text=f"{row['overall_rate']:.1f}%", font=("Arial", 12, "bold"), text_color=color).place(relx=0.72, rely=0.5, anchor="w")
             
+            # Action Buttons
+            act_f = ctk.CTkFrame(r_f, fg_color="transparent")
+            act_f.place(relx=0.86, rely=0.5, anchor="w")
+            
+            ctk.CTkButton(act_f, text="📊", width=30, height=28, fg_color="#28A745", hover_color="#218838",
+                          command=lambda p=p_val: self.export_individual_period(p, "excel")).pack(side="left", padx=2)
+            ctk.CTkButton(act_f, text="📄", width=30, height=28, fg_color="#DC3545", hover_color="#C82333",
+                          command=lambda p=p_val: self.export_individual_period(p, "pdf")).pack(side="left", padx=2)
+
             ctk.CTkFrame(table_f, fg_color="#F3F4F6", height=1).pack(fill="x", padx=10)
 
         # Summary Average Row
         avg_f = ctk.CTkFrame(self.annually_table_container, fg_color="#F3F4F6", height=60, corner_radius=10)
         avg_f.pack(fill="x", pady=(10, 0))
         
-        # Filter df to only periods with data for this type for meaningful averages
-        sub_df = df[df[f'{prefix}_present'] > 0]
-        if not sub_df.empty:
-            a_pres = sub_df[f'{prefix}_present'].mean()
-            a_bro = sub_df[f'{prefix}_bro'].mean()
-            a_sis = sub_df[f'{prefix}_sis'].mean()
-            a_mbr = sub_df[f'{prefix}_mbr'].mean()
-            a_ts = sub_df[f'{prefix}_ts'].mean()
-            a_area = sub_df[f'{prefix}_area_rate'].mean()
-            a_over = sub_df[f'{prefix}_overall_rate'].mean()
+        if not df.empty:
+            a_pres = df['present'].mean()
+            a_bro = df['bro'].mean()
+            a_sis = df['sis'].mean()
+            a_mbr = df['mbr'].mean()
+            a_ts = df['ts'].mean()
+            a_area = df['area_rate'].mean()
+            a_over = df['overall_rate'].mean()
             
             ctk.CTkLabel(avg_f, text="AVERAGE:", font=("Arial", 12, "bold")).place(relx=0.05, rely=0.5, anchor="w")
-            ctk.CTkLabel(avg_f, text=f"{a_pres:.1f}", font=("Arial", 12, "bold")).place(relx=0.2, rely=0.5, anchor="w")
-            ctk.CTkLabel(avg_f, text=f"{a_bro:.1f} / {a_sis:.1f}", font=("Arial", 11)).place(relx=0.36, rely=0.5, anchor="w")
-            ctk.CTkLabel(avg_f, text=f"{a_mbr:.1f} / {a_ts:.1f}", font=("Arial", 11)).place(relx=0.52, rely=0.5, anchor="w")
-            ctk.CTkLabel(avg_f, text=f"{a_area:.1f}%", font=("Arial", 12, "bold"), text_color="#2563EB").place(relx=0.68, rely=0.5, anchor="w")
-            ctk.CTkLabel(avg_f, text=f"{a_over:.1f}%", font=("Arial", 12, "bold"), text_color=color).place(relx=0.84, rely=0.5, anchor="w")
+            ctk.CTkLabel(avg_f, text=f"{a_pres:.1f}", font=("Arial", 12, "bold")).place(relx=0.16, rely=0.5, anchor="w")
+            ctk.CTkLabel(avg_f, text=f"{a_bro:.1f} / {a_sis:.1f}", font=("Arial", 11)).place(relx=0.30, rely=0.5, anchor="w")
+            ctk.CTkLabel(avg_f, text=f"{a_mbr:.1f} / {a_ts:.1f}", font=("Arial", 11)).place(relx=0.44, rely=0.5, anchor="w")
+            ctk.CTkLabel(avg_f, text=f"{a_area:.1f}%", font=("Arial", 12, "bold"), text_color="#2563EB").place(relx=0.58, rely=0.5, anchor="w")
+            ctk.CTkLabel(avg_f, text=f"{a_over:.1f}%", font=("Arial", 12, "bold"), text_color=color).place(relx=0.72, rely=0.5, anchor="w")
+
+    def export_individual_period(self, period_str, kind):
+        """Downloads a detailed report for every session within the clicked period."""
+        try:
+            p_type = self.report_period_var.get().lower()
+            s_type = self.report_type_var.get()
+            def_area = self.settings.get("default_area", "")
+            
+            from report import ReportGenerator
+            rg = ReportGenerator()
+            path = rg.generate_individual_period_report(period_str, p_type, s_type, def_area, kind)
+            
+            if path:
+                messagebox.showinfo("Download Complete", f"Individual report for {period_str} saved to:\n{os.path.abspath(path)}")
+            else:
+                messagebox.showwarning("Empty Report", f"No detailed session records found for {period_str}.")
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+
+    def export_annually_report(self, kind):
+        try:
+            p_type = self.report_period_var.get().lower()
+            s_type = self.report_type_var.get()
+            if s_type == "Other Sessions": s_type = "Other"
+            
+            def_area = self.settings.get("default_area", "")
+            from report import ReportGenerator
+            rg = ReportGenerator()
+            
+            if kind == "excel":
+                path = rg.generate_periodical_excel(p_type, s_type, def_area)
+            else:
+                path = rg.generate_periodical_pdf(p_type, s_type, def_area)
+                
+            if path:
+                messagebox.showinfo("Export Successful", f"Report saved to:\n{os.path.abspath(path)}")
+            else:
+                messagebox.showwarning("Export Failed", "No data available for export.")
+        except Exception as e:
+            messagebox.showerror("Export Error", str(e))
         
 
     def init_org_chart_page(self):
