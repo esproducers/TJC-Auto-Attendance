@@ -57,20 +57,24 @@ run.bat
 ---
 
 **## 🍎 2. Mac (macOS) Installation**
-### Step 1: Open Terminal and Navigate correctly
+
+### Step 1: Install Python
+When installing Python from the official website
+
+### Step 2: Open Terminal and Navigate correctly
 1.  Open **Terminal**.
 2.  Type `cd ` (type cd followed by a **space**, do not press Enter yet).
 3.  Find your project folder on your Desktop.
 4.  **Drag and Drop** that folder directly into the Terminal window. It will automatically type the correct path for you.
 5.  Press **Enter**.
 
-### Step 2: Run the Setup
+### Step 3: Run the Setup
 Once you are successfully inside the folder (you should see the folder name in your Terminal prompt), copy and paste this **single line** and press Enter:
 ```bash
 chmod +x *.sh && ./install.sh
 ```
 
-### Step 3: Start the App
+### Step 4: Start the App
 After the installation finishes, just type:
 ```bash
 ./run.sh
