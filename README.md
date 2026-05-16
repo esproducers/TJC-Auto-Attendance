@@ -57,21 +57,21 @@ run.bat
 ---
 
 **## 🍎 2. Mac (macOS) Installation**
-### Step 1: Download & Open Terminal
-Download the code from GitHub and extract the folder. Open the **Terminal** app.
+### Step 1: Open Terminal and Navigate correctly
+1.  Open **Terminal**.
+2.  Type `cd ` (type cd followed by a **space**, do not press Enter yet).
+3.  Find your project folder on your Desktop.
+4.  **Drag and Drop** that folder directly into the Terminal window. It will automatically type the correct path for you.
+5.  Press **Enter**.
 
-**### Step 2: Navigate to Folder**
-Type `cd ` (with a space) and **drag your project folder** into the Terminal. Press Enter.
-
-**### Step 3: Run Setup**
-Run these two commands in order:
+### Step 2: Run the Setup
+Once you are successfully inside the folder (you should see the folder name in your Terminal prompt), copy and paste this **single line** and press Enter:
 ```bash
-chmod +x *.sh
-./install.sh
+chmod +x *.sh && ./install.sh
 ```
 
-### Step 4: Run the App
-*Wait for it to finish.* Then, whenever you want to start the app, just run:
+### Step 3: Start the App
+After the installation finishes, just type:
 ```bash
 ./run.sh
 ```
