@@ -32,26 +32,48 @@ class InsightFaceAttendance:
             os.makedirs(d, exist_ok=True)
 
         # Camera
-        self.camera = cv2.VideoCapture(camera_id)
+        self.current_camera_id = camera_id
+        self.camera = cv2.VideoCapture(self.current_camera_id)
         self.camera.set(cv2.CAP_PROP_FRAME_WIDTH,  1920)
         self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
 
         # InsightFace (Portable: root='./models' lets you keep the AI files in the project folder)
         self.face_app = insightface.app.FaceAnalysis(name='buffalo_l', root='./models')
-        self.face_app.prepare(ctx_id=-1, det_size=(640, 640))
+        self.is_prepared = False
+        
+        # Initialize basic attributes to prevent crashes before preparation
+        self.active_session_id  = None
+        self.session_captured_ids = set()
+        self.session_captured_names = set()
+        self.session_unknown_encodings = []
+        self.pending_unknowns = {}
+        self.frame_count = 0
+        self.process_every_n_frames = 5
+        self.known_face_encodings = []
+        self.known_face_names = []
+        self.known_face_ids = []
 
+    def switch_camera(self, camera_id):
+        """Release current camera and open a new one."""
+        if hasattr(self, 'camera') and self.camera:
+            self.camera.release()
+        self.current_camera_id = camera_id
+        self.camera = cv2.VideoCapture(self.current_camera_id)
+        self.camera.set(cv2.CAP_PROP_FRAME_WIDTH,  1920)
+        self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
+        return self.camera.isOpened()
+
+    def prepare(self, ctx_id=-1, det_size=(640, 640)):
+        """Prepare the FaceAnalysis app. Might download models if missing."""
+        self.face_app.prepare(ctx_id=ctx_id, det_size=det_size)
+        self.is_prepared = True
+        
         self.known_face_encodings = []
         self.known_face_names     = []
         self.known_face_ids       = []
         self.load_known_faces()
 
         self.init_database()
-
-        self.active_session_id  = None
-        self.session_captured_ids = set()   # member codes captured this session
-        self.session_unknown_encodings = [] # encodings of unknown faces this session
-        self.frame_count          = 0
-        self.process_every_n_frames = 5
 
     # ── Face cache ────────────────────────────────────────────────────────────
 
@@ -272,22 +294,23 @@ class InsightFaceAttendance:
             code = m['member_code']
             exists = c.execute("SELECT 1 FROM members WHERE member_code=?", (code,)).fetchone()
             
-            # Prepare data row (column order matching sqlite init)
+            # Prepare data row
             vals = (code, m['name'], m['type'], m['age'], m['dob'], m['baptism_date'],
                     m['address'], m['email'], m['phone'], m['has_holy_spirit'],
-                    m['image_path'], m['registration_date'], m['area'], m.get('remark', ''))
+                    m['image_path'], m['registration_date'], m['area'], m.get('remark', ''),
+                    m.get('title', ''))
             
             if exists:
                 c.execute("""UPDATE members SET name=?, type=?, age=?, dob=?, baptism_date=?, 
                            address=?, email=?, phone=?, has_holy_spirit=?, image_path=?, 
-                           registration_date=?, area=?, remark=? WHERE member_code=?""", 
+                           registration_date=?, area=?, remark=?, title=? WHERE member_code=?""", 
                         (vals[1], vals[2], vals[3], vals[4], vals[5], vals[6], vals[7], 
-                         vals[8], vals[9], vals[10], vals[11], vals[12], vals[13], code))
+                         vals[8], vals[9], vals[10], vals[11], vals[12], vals[13], vals[14], code))
                 updated += 1
             else:
                 c.execute("""INSERT INTO members (member_code, name, type, age, dob, baptism_date, 
-                           address, email, phone, has_holy_spirit, image_path, registration_date, area, remark)
-                           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", vals)
+                           address, email, phone, has_holy_spirit, image_path, registration_date, area, remark, title)
+                           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", vals)
                 added += 1
         
         conn.commit()
@@ -334,31 +357,85 @@ class InsightFaceAttendance:
 
         conn = sqlite3.connect(self.db_path)
         c    = conn.cursor()
-        exists = c.execute("SELECT 1 FROM members WHERE member_code=?", (code,)).fetchone()
+        exists = c.execute("SELECT 1 FROM members WHERE member_code=?", (code,)).fetchone() # FOUND IT
 
         if exists:
-            c.execute('''UPDATE members SET name=?,type=?,age=?,dob=?,baptism_date=?,
-                         address=?,email=?,phone=?,has_holy_spirit=?,area=?,image_path=?,remark=?,age_category=? WHERE member_code=?''',
-                      (data.get('name',''), data.get('type','Member'), age,
-                       data.get('dob'), data.get('baptism_date'),
-                       data.get('address'), data.get('email'), data.get('phone'),
-                       1 if data.get('has_holy_spirit') else 0,
-                       data.get('area', '').strip(), data.get('image_path', ''), 
-                       data.get('remark', '').strip(), age_cat, code))
+            # Fetch existing data to avoid overwriting with defaults
+            conn.row_factory = sqlite3.Row
+            # Use conn.execute directly or recreate cursor
+            old = conn.execute("SELECT * FROM members WHERE member_code=?", (code,)).fetchone()
+            old = dict(old) if old else {}
+            
+            final_data = old.copy()
+            # Update only if provided in 'data'
+            if 'name' in data: final_data['name'] = data['name']
+            if 'type' in data: final_data['type'] = data['type']
+            if 'dob' in data: 
+                final_data['dob'] = data['dob']
+                final_data['age'] = age
+            if 'baptism_date' in data: final_data['baptism_date'] = data['baptism_date']
+            if 'address' in data: final_data['address'] = data['address']
+            if 'email' in data: final_data['email'] = data['email']
+            if 'phone' in data: final_data['phone'] = data['phone']
+            if 'has_holy_spirit' in data: final_data['has_holy_spirit'] = 1 if data['has_holy_spirit'] else 0
+            if 'area' in data: final_data['area'] = data['area'].strip()
+            if 'image_path' in data: final_data['image_path'] = data['image_path']
+            if 'remark' in data: final_data['remark'] = data['remark'].strip()
+            if 'age_category' in data: final_data['age_category'] = data['age_category']
+            if 'title' in data: final_data['title'] = data['title'].strip()
+            
+            # Re-calculate age category if DOB changed
+            if 'dob' in data:
+                final_data['age_category'] = age_cat
+                
+            # Get all column names for extra fields
+            c.execute("PRAGMA table_info(members)")
+            db_cols = [row[1] for row in c.fetchall()]
+            
+            # Merge extra fields
+            for k, v in data.items():
+                if k in db_cols and k not in final_data and k != 'member_code' and k != 'registration_date':
+                    final_data[k] = v
+            
+            final_data["title"] = data.get('title', '').strip()
+            
+            sets = ", ".join([f"{k}=?" for k in final_data.keys()])
+            vals = list(final_data.values())
+            vals.append(code)
+            c.execute(f"UPDATE members SET {sets} WHERE member_code=?", vals)
         else:
-            c.execute('''INSERT INTO members
-                (member_code,name,type,age,dob,baptism_date,address,email,phone,
-                 has_holy_spirit,image_path,registration_date,area,remark,age_category)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
-                (code, data.get('name',''), data.get('type','Member'), age,
-                 data.get('dob'), data.get('baptism_date'),
-                 data.get('address'), data.get('email'), data.get('phone'),
-                 1 if data.get('has_holy_spirit') else 0,
-                 data.get('image_path'), date.today(),
-                 data.get('area', '').strip(), data.get('remark', '').strip(), age_cat))
+            c.execute("PRAGMA table_info(members)")
+            db_cols = [row[1] for row in c.fetchall()]
+            
+            final_data = {
+                "member_code": code, "registration_date": str(date.today()),
+                "name": data.get('name', ''), "type": data.get('type', 'Member'),
+                "age": age, "dob": data.get('dob'), "baptism_date": data.get('baptism_date'),
+                "address": data.get('address'), "email": data.get('email'), "phone": data.get('phone'),
+                "has_holy_spirit": 1 if data.get('has_holy_spirit') else 0,
+                "area": data.get('area', '').strip(), "image_path": data.get('image_path', ''),
+                "remark": data.get('remark', '').strip(), "age_category": age_cat,
+                "title": data.get('title', '')
+            }
+            # Merge extra fields
+            for k, v in data.items():
+                if k in db_cols and k not in final_data:
+                    final_data[k] = v
+            
+            # Ensure all DB columns are present
+            for col in db_cols:
+                if col not in final_data:
+                    final_data[col] = None
+            
+            final_data["title"] = data.get('title', '').strip()
+            
+            cols_str = ", ".join(final_data.keys())
+            places = ", ".join(["?"] * len(final_data))
+            c.execute(f"INSERT INTO members ({cols_str}) VALUES ({places})", list(final_data.values()))
 
         conn.commit()
         conn.close()
+
 
         # Copy face photo and rebuild cache
         img_path = data.get('image_path', '')
@@ -379,12 +456,12 @@ class InsightFaceAttendance:
 
     # ── Sessions ──────────────────────────────────────────────────────────────
 
-    def start_session(self, title, duration_mins=None):
+    def start_session(self, title, duration_mins=None, seminar_type='Other'):
         now  = datetime.now()
         conn = sqlite3.connect(self.db_path)
         c    = conn.cursor()
-        c.execute("INSERT INTO sessions (title,date,start_time,duration_mins) VALUES (?,?,?,?)",
-                  (title, now.date(), now, duration_mins))
+        c.execute("INSERT INTO sessions (title,date,start_time,duration_mins,seminar_type) VALUES (?,?,?,?,?)",
+                  (title, now.date(), now, duration_mins, seminar_type))
         self.active_session_id = c.lastrowid
         conn.commit()
         conn.close()
@@ -536,10 +613,12 @@ class InsightFaceAttendance:
     def process_frame(self, frame):
         """Returns (annotated_frame, list_of_result_dicts)"""
         results = []
+        if not self.is_prepared:
+            return frame, results
 
         if self.frame_count % self.process_every_n_frames == 0:
-            small  = cv2.resize(frame, (0, 0), fx=0.5, fy=0.5)
-            faces  = self.face_app.get(small)
+            small = cv2.resize(frame, (0, 0), fx=0.5, fy=0.5)
+            faces = self.face_app.get(small)
 
             for face in faces:
                 embedding = face.embedding
@@ -557,17 +636,18 @@ class InsightFaceAttendance:
                 bbox = (face.bbox.astype(int) * 2).tolist()
 
                 if match_name != "Unknown":
-                    # Look up member type
+                    # Look up member type and title
                     conn   = sqlite3.connect(self.db_path)
-                    row    = conn.execute("SELECT type FROM members WHERE member_code=?",
+                    row    = conn.execute("SELECT type, title FROM members WHERE member_code=?",
                                          (match_code,)).fetchone()
                     conn.close()
-                    m_type = (row[0].lower() if row else 'member')
+                    m_type  = (row[0].lower() if row else 'member')
+                    m_title = (row[1] if row else '')
 
                     # Always add to results for visual display
                     results.append({'name': match_name, 'code': match_code,
                                     'bbox': bbox, 'new': False,
-                                    'img': None, 'type': m_type})
+                                    'img': None, 'type': m_type, 'title': m_title})
 
                     # Only perform attendance marking if not yet captured this session
                     if match_code not in self.session_captured_ids:
@@ -713,3 +793,97 @@ class InsightFaceAttendance:
         """, (sid,)).fetchall()
         conn.close()
         return rows
+
+    def get_periodical_stats(self, period_type='weekly', default_area=None):
+        """Aggregate stats for Friday, Saturday, and Combined seminars."""
+        import sqlite3
+        import pandas as pd
+        conn = sqlite3.connect(self.db_path)
+        
+        total_sys_m = conn.execute("SELECT COUNT(*) FROM members WHERE type='Member'").fetchone()[0]
+        if default_area:
+            da = default_area.strip().lower()
+            area_m_total = conn.execute("SELECT COUNT(*) FROM members WHERE type='Member' AND LOWER(TRIM(area))=?", (da,)).fetchone()[0]
+        else:
+            da = None
+            area_m_total = total_sys_m
+
+        if period_type == 'weekly':
+            date_fmt = '%Y-W%W'
+        elif period_type == 'monthly':
+            date_fmt = '%Y-%m'
+        else:
+            date_fmt = '%Y'
+            
+        query = f"""
+            SELECT 
+                strftime('{date_fmt}', s.date) as period,
+                
+                -- Friday
+                COUNT(CASE WHEN s.seminar_type = 'Friday Seminar' THEN a.id END) as fri_present,
+                SUM(CASE WHEN s.seminar_type = 'Friday Seminar' AND m.title = 'Brother' THEN 1 ELSE 0 END) as fri_bro,
+                SUM(CASE WHEN s.seminar_type = 'Friday Seminar' AND m.title = 'Sister' THEN 1 ELSE 0 END) as fri_sis,
+                SUM(CASE WHEN s.seminar_type = 'Friday Seminar' AND m.type = 'Member' THEN 1 ELSE 0 END) as fri_mbr,
+                SUM(CASE WHEN s.seminar_type = 'Friday Seminar' AND m.type LIKE '%Truth%' THEN 1 ELSE 0 END) as fri_ts,
+                SUM(CASE WHEN s.seminar_type = 'Friday Seminar' AND m.type = 'Member' AND LOWER(TRIM(m.area)) = ? THEN 1 ELSE 0 END) as fri_area_present,
+                COUNT(DISTINCT CASE WHEN s.seminar_type = 'Friday Seminar' THEN s.id END) as fri_sess_count,
+
+                -- Saturday
+                COUNT(CASE WHEN s.seminar_type = 'Saturday Seminar' THEN a.id END) as sat_present,
+                SUM(CASE WHEN s.seminar_type = 'Saturday Seminar' AND m.title = 'Brother' THEN 1 ELSE 0 END) as sat_bro,
+                SUM(CASE WHEN s.seminar_type = 'Saturday Seminar' AND m.title = 'Sister' THEN 1 ELSE 0 END) as sat_sis,
+                SUM(CASE WHEN s.seminar_type = 'Saturday Seminar' AND m.type = 'Member' THEN 1 ELSE 0 END) as sat_mbr,
+                SUM(CASE WHEN s.seminar_type = 'Saturday Seminar' AND m.type LIKE '%Truth%' THEN 1 ELSE 0 END) as sat_ts,
+                SUM(CASE WHEN s.seminar_type = 'Saturday Seminar' AND m.type = 'Member' AND LOWER(TRIM(m.area)) = ? THEN 1 ELSE 0 END) as sat_area_present,
+                COUNT(DISTINCT CASE WHEN s.seminar_type = 'Saturday Seminar' THEN s.id END) as sat_sess_count,
+
+                -- Combined (Totals)
+                COUNT(a.id) as tot_present,
+                SUM(CASE WHEN m.title = 'Brother' THEN 1 ELSE 0 END) as tot_bro,
+                SUM(CASE WHEN m.title = 'Sister' THEN 1 ELSE 0 END) as tot_sis,
+                SUM(CASE WHEN m.type = 'Member' THEN 1 ELSE 0 END) as tot_mbr,
+                SUM(CASE WHEN m.type LIKE '%Truth%' THEN 1 ELSE 0 END) as tot_ts,
+                SUM(CASE WHEN m.type = 'Member' AND LOWER(TRIM(m.area)) = ? THEN 1 ELSE 0 END) as tot_area_present,
+                COUNT(DISTINCT s.id) as tot_sess_count
+
+            FROM sessions s
+            JOIN attendance a ON a.session_id = s.id
+            LEFT JOIN members m ON a.member_code = m.member_code
+            WHERE s.seminar_type IN ('Friday Seminar', 'Saturday Seminar')
+            GROUP BY period
+            ORDER BY period DESC
+        """
+        
+        df = pd.read_sql(query, conn, params=[da, da, da])
+        
+        if not df.empty:
+            # Format Period strings for readability
+            def format_p(p):
+                try:
+                    if period_type == 'weekly':
+                        # p is like '2026-W20'
+                        y, w = p.split('-W')
+                        return f"Week {w}, {y}"
+                    elif period_type == 'monthly':
+                        # p is like '2026-05'
+                        dt = datetime.strptime(p, '%Y-%m')
+                        return dt.strftime('%b %Y').upper()
+                    return p
+                except: return p
+                
+            df['period'] = df['period'].apply(format_p)
+
+            # Rates for Friday
+            df['fri_overall_rate'] = (df['fri_mbr'] / (total_sys_m * df['fri_sess_count'].replace(0, 1)) * 100).fillna(0)
+            df['fri_area_rate'] = (df['fri_area_present'] / (area_m_total * df['fri_sess_count'].replace(0, 1)) * 100).fillna(0)
+            
+            # Rates for Saturday
+            df['sat_overall_rate'] = (df['sat_mbr'] / (total_sys_m * df['sat_sess_count'].replace(0, 1)) * 100).fillna(0)
+            df['sat_area_rate'] = (df['sat_area_present'] / (area_m_total * df['sat_sess_count'].replace(0, 1)) * 100).fillna(0)
+            
+            # Rates for Combined
+            df['tot_overall_rate'] = (df['tot_mbr'] / (total_sys_m * df['tot_sess_count']) * 100).fillna(0)
+            df['tot_area_rate'] = (df['tot_area_present'] / (area_m_total * df['tot_sess_count']) * 100).fillna(0)
+            
+        conn.close()
+        return df

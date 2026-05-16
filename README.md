@@ -53,7 +53,6 @@ install.bat
 ```bash
 run.bat
 ```
-```
 
 ---
 
@@ -95,6 +94,35 @@ To make it even easier for others, you can create a shortcut on your desktop:
 
 ---
 
+## 📖 User Guide & Administration
+
+### 👥 Accounts & Access
+- **Default Account**: Used for general attendance capture. Restricted from reports and settings.
+- **Admin Account**: 
+  - **User**: `admin`
+  - **Password**: `admin123`
+- **Security Word**: Set this in **Settings**. It is required to reset your password if forgotten.
+
+### 🔐 Security & Passwords
+- **Network Security**: The "🛡️ Firewall Active" badge in the sidebar indicates that all data is kept 100% offline. You can toggle this if remote sync is ever required.
+- **Resetting Password**: 
+  - If forgotten: Use the **"Forgot Password"** link on the login screen (requires Security Word).
+  - While logged in: Go to **Settings** > **Update Admin Password**.
+
+### 📸 Camera Management
+- The system supports multiple cameras (e.g., Built-in + USB).
+- Select your preferred camera from the **Sidebar Dropdown**.
+- Use the **🔄 Refresh** button to detect new USB cameras without restarting.
+
+### 📅 Seminar Reporting (Annual Report)
+- When clicking **"Start"** on the Dashboard, you must select the **Seminar Type**:
+  - `Normal`
+  - `Friday Seminar`
+  - `Saturday Seminar`
+- **Crucial**: The **Annually Report** only calculates data from sessions marked as `Friday Seminar` or `Saturday Seminar`. Selecting these correctly ensures your Weekly, Monthly, and Yearly summaries are accurate.
+
+---
+
 ## 📂 3. Transferring Your Data
 If you want to move your existing members and photos to the new computer:
 1.  Copy the **`database/attendance.db`** file.
@@ -105,6 +133,7 @@ If you want to move your existing members and photos to the new computer:
 
 ## 📁4. Environment Directory Tree Map Structure
 - `main.py`: Internal backbone controller (Real-time Detection + Logging Event Router).
+- `app.py`: The graphical user interface (GUI).
 - `report.py`: Script dedicated functionally to printing Excel analysis.
 - `requirements.txt`: Master blueprint of pip dependencies dictating native compatibility.
 - `registered_faces/`: Raw unbridled collection of individual identity templates serving as root knowledge.
@@ -112,6 +141,3 @@ If you want to move your existing members and photos to the new computer:
 - `cache/`: Transient artifact collection representing computed facial encoding binary blobs to speed-up hot-start times.
 - `reports/`: Sub-folder collecting final generated chronological `.xlsx` spreadsheet outcomes.
 - `logs/`: Application operational footprints and metrics (currently reserved and empty).
-
----
-

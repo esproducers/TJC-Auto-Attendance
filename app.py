@@ -1,4 +1,45 @@
 import os
+import sys
+import socket
+
+# --- CONFIDENTIAL DATA FIREWALL (BLOCKS ALL NETWORK TRAFFIC) ---
+# This block ensures data privacy by preventing unauthorized connections.
+FIREWALL_BYPASS = False
+
+_orig_connect = socket.socket.connect
+_orig_getaddrinfo = socket.getaddrinfo
+_orig_bind = socket.socket.bind
+_orig_sendto = socket.socket.sendto
+
+def _is_local(address):
+    if isinstance(address, tuple): host = address[0]
+    else: host = str(address)
+    return host in ('127.0.0.1', 'localhost', '::1')
+
+def secure_connect(self, address):
+    if FIREWALL_BYPASS or _is_local(address): return _orig_connect(self, address)
+    raise ConnectionRefusedError(f"Firewall Blocked: Outbound connection to {address} is prohibited.")
+
+def secure_getaddrinfo(host, port, *args, **kwargs):
+    if FIREWALL_BYPASS or _is_local(host): return _orig_getaddrinfo(host, port, *args, **kwargs)
+    raise ConnectionRefusedError(f"Firewall Blocked: DNS lookup for {host} is prohibited.")
+
+def secure_bind(self, address):
+    if FIREWALL_BYPASS or _is_local(address): return _orig_bind(self, address)
+    raise ConnectionRefusedError(f"Firewall Blocked: Binding on {address} is prohibited.")
+
+def secure_sendto(self, data, address):
+    if FIREWALL_BYPASS or _is_local(address): return _orig_sendto(self, data, address)
+    raise ConnectionRefusedError(f"Firewall Blocked: UDP packet to {address} is prohibited.")
+
+socket.socket.connect = secure_connect
+socket.getaddrinfo = secure_getaddrinfo
+socket.socket.bind = secure_bind
+socket.socket.sendto = secure_sendto
+
+print("[SECURITY] Confidential Data Firewall is ACTIVE.")
+# ----------------------------------------------------------------
+
 import sqlite3
 import json
 import cv2
@@ -353,6 +394,8 @@ class AutoAttendanceApp(ctk.CTk):
         self.load_settings()
         self.backend  = InsightFaceAttendance()
         self.reporter = ReportGenerator()
+        
+        self.after(500, self.initialize_face_engine)
 
         self.is_marking       = False
         self.is_paused        = False
@@ -400,7 +443,11 @@ class AutoAttendanceApp(ctk.CTk):
         self.init_logs_page()
         self.init_reports_page()
         self.init_org_chart_page()
+        self.init_sql_page()
         self.init_settings_page()
+        self.init_annually_report_page()
+        self.check_auto_periodical_reports()
+
 
         self.show_frame("dashboard")
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
@@ -408,6 +455,43 @@ class AutoAttendanceApp(ctk.CTk):
 
         # Update README with admin info
         self._update_readme_admin()
+
+    def initialize_face_engine(self):
+        """Attempts to load AI models, asking for temporary internet access if they are missing."""
+        try:
+            # First attempt: With firewall active
+            self.backend.prepare()
+            print("[INFO] AI Engine initialized successfully (Offline).")
+        except Exception as e:
+            print(f"[WARN] AI Engine failed to initialize: {e}")
+            # If it failed, it might be due to missing models needing download
+            if messagebox.askyesno("AI Models Missing", 
+                                   "The required Face Recognition models are missing from your system.\n\n"
+                                   "Would you like to TEMPORARILY enable internet access to download them? (approx. 300MB)\n\n"
+                                   "Data privacy firewall will be paused only during the download."):
+                global FIREWALL_BYPASS
+                FIREWALL_BYPASS = True
+                
+                # Show a progress notice
+                notice = ctk.CTkToplevel(self)
+                notice.title("Downloading Models...")
+                notice.geometry("300x150")
+                notice.attributes("-topmost", True)
+                ctk.CTkLabel(notice, text="Downloading AI Models...\nPlease wait, this may take a few minutes.", pady=20).pack()
+                self.update()
+                
+                try:
+                    self.backend.prepare()
+                    messagebox.showinfo("Success", "Models downloaded and initialized successfully!\nFirewall is now RE-LOCKED.")
+                except Exception as e2:
+                    messagebox.showerror("Download Error", f"Failed to download models: {e2}")
+                finally:
+                    FIREWALL_BYPASS = False
+                    notice.destroy()
+            else:
+                messagebox.showwarning("Initialization Incomplete", 
+                                       "Face recognition will not work without models. "
+                                       "You can manually place the models in the './models' folder to stay 100% offline.")
 
     def _update_readme_admin(self):
         if os.path.exists("README.md"):
@@ -439,6 +523,40 @@ class AutoAttendanceApp(ctk.CTk):
         with open("settings.json", "w") as f:
             json.dump(self.settings, f, indent=4)
 
+    def check_auto_periodical_reports(self):
+        """Automatically generates Excel reports on specific milestones (1st day of week/month/year)."""
+        today = date.today()
+        last_check = self.settings.get("last_auto_report_check", "")
+        if last_check == str(today):
+            return
+            
+        # Milestones: Monday (0), 1st of Month, 1st of Year
+        is_monday = today.weekday() == 0
+        is_1st_month = today.day == 1
+        is_1st_year = today.month == 1 and today.day == 1
+        
+        if is_monday or is_1st_month or is_1st_year:
+            try:
+                from report import ReportGenerator
+                rg = ReportGenerator()
+                def_area = self.settings.get("default_area", "")
+                
+                if is_1st_year:
+                    rg.generate_periodical_report('yearly', default_area=def_area)
+                if is_1st_month:
+                    rg.generate_periodical_report('monthly', default_area=def_area)
+                if is_monday:
+                    rg.generate_periodical_report('weekly', default_area=def_area)
+                
+                # We don't show a popup to avoid bothering the user on startup,
+                # but the files will be in the 'reports' folder.
+                print(f"[AUTO-REPORT] Periodical reports generated for {today}")
+            except Exception as e:
+                print(f"[AUTO-REPORT] Error: {e}")
+
+        self.settings["last_auto_report_check"] = str(today)
+        self.save_settings()
+
     # ── Sidebar ───────────────────────────────────────────────────────────────
 
     def init_sidebar(self):
@@ -459,8 +577,10 @@ class AutoAttendanceApp(ctk.CTk):
 
         nav = [("🏠  Dashboard", "dashboard"), ("👥  Members", "members"),
                ("📜  Attendance Logs", "logs"), ("📊  Reports", "reports"),
+               ("📅  Annually Report", "annually_report"),
                ("📊  Organization chart", "org_chart"),
-               ("⚙  Settings", "settings")]
+               ("⚙  Settings", "settings"),
+               ("🗄  SQL Data", "sql")]
         self.nav_buttons = {}
         for text, key in nav:
             btn = ctk.CTkButton(self.sidebar, text=text, font=("Arial", 13), height=44,
@@ -470,10 +590,34 @@ class AutoAttendanceApp(ctk.CTk):
             btn.pack(pady=3, padx=12, fill="x")
             self.nav_buttons[key] = btn
         
+        # Camera Selection Section
+        self.cam_section = ctk.CTkFrame(self.sidebar, fg_color="transparent")
+        self.cam_section.pack(pady=15, padx=12, fill="x")
+        
+        ctk.CTkLabel(self.cam_section, text="📷 CAMERA SELECTION", font=("Arial", 10, "bold"), text_color="#9CA3AF").pack(anchor="w", padx=5, pady=(0, 5))
+        
+        self.cam_select_f = ctk.CTkFrame(self.cam_section, fg_color="transparent")
+        self.cam_select_f.pack(fill="x")
+        
+        self.cam_var = ctk.StringVar(value="Camera 0")
+        self.cam_menu = ctk.CTkComboBox(self.cam_select_f, values=["Camera 0"], variable=self.cam_var, command=self.on_camera_change, height=35)
+        self.cam_menu.pack(side="left", fill="x", expand=True, padx=(0, 5))
+        
+        self.cam_refresh_btn = ctk.CTkButton(self.cam_select_f, text="🔄", width=35, height=35, command=self.refresh_camera_list)
+        self.cam_refresh_btn.pack(side="right")
+        
+        # Initialize camera list
+        self.after(1000, self.refresh_camera_list)
+        
         # Admin Login/Logout at bottom
         self.sidebar_bottom = ctk.CTkFrame(self.sidebar, fg_color="transparent")
         self.sidebar_bottom.pack(side="bottom", fill="x", pady=20)
         
+        # Firewall Status Badge
+        self.fw_badge = ctk.CTkLabel(self.sidebar_bottom, text="🛡️ Firewall Active", font=("Arial", 11, "bold"),
+                                     fg_color="#D1FAE5", text_color="#059669", corner_radius=6, height=28)
+        self.fw_badge.pack(padx=12, pady=(0, 10), fill="x")
+
         self.login_btn = ctk.CTkButton(self.sidebar_bottom, text="🔐 Admin Login", font=("Arial", 12, "bold"),
                                        height=38, fg_color="#F3F4F6", text_color="#374151",
                                        hover_color="#E5E7EB", command=self.on_login_click)
@@ -483,13 +627,52 @@ class AutoAttendanceApp(ctk.CTk):
 
     def refresh_sidebar_visibility(self):
         # Hide restricted buttons for public
-        restricted = ["reports", "org_chart", "settings"]
+        restricted = ["reports", "annually_report", "org_chart", "settings", "sql"]
         for key in restricted:
             if key in self.nav_buttons:
                 if self.is_admin:
                     self.nav_buttons[key].pack(pady=3, padx=12, fill="x")
                 else:
                     self.nav_buttons[key].pack_forget()
+
+    def refresh_camera_list(self):
+        """Detect available cameras by trying indices 0-4."""
+        available = []
+        current_id = getattr(self.backend, 'current_camera_id', 0)
+        
+        for i in range(5):
+            # If it's the current camera, it's definitely available
+            if i == current_id:
+                available.append(f"Camera {i}")
+                continue
+                
+            # Otherwise, try to open it briefly
+            cap = cv2.VideoCapture(i)
+            if cap.isOpened():
+                available.append(f"Camera {i}")
+                cap.release()
+        
+        if not available:
+            available = [f"Camera {current_id}"]
+        
+        # Sort by index
+        available.sort(key=lambda x: int(x.split()[-1]))
+        
+        self.cam_menu.configure(values=available)
+        if self.cam_var.get() not in available:
+            self.cam_var.set(f"Camera {current_id}")
+
+    def on_camera_change(self, choice):
+        if "Camera" in choice:
+            try:
+                cam_id = int(choice.split()[-1])
+                success = self.backend.switch_camera(cam_id)
+                if not success:
+                    messagebox.showerror("Error", f"Failed to open {choice}")
+                else:
+                    print(f"[INFO] Switched to {choice}")
+            except Exception as e:
+                messagebox.showerror("Error", f"Camera switch failed: {e}")
         
         # Update login button text
         if self.is_admin:
@@ -613,7 +796,7 @@ class AutoAttendanceApp(ctk.CTk):
 
     def show_frame(self, page_id):
         # Restriction check
-        restricted = ["reports", "org_chart", "settings"]
+        restricted = ["reports", "annually_report", "org_chart", "settings", "sql"]
         if page_id in restricted and not self.is_admin:
             messagebox.showwarning("Restricted", "Admin login required to access this page.")
             return
@@ -919,7 +1102,7 @@ class AutoAttendanceApp(ctk.CTk):
         q_area = self.member_area_filter.get().strip().lower()
 
         conn  = sqlite3.connect("database/attendance.db")
-        query = "SELECT member_code, name, type, age_category, area, image_path FROM members WHERE 1=1"
+        query = "SELECT member_code, name, type, age_category, area, image_path, title FROM members WHERE 1=1"
         params = []
         
         if q_name:
@@ -961,7 +1144,7 @@ class AutoAttendanceApp(ctk.CTk):
             return
 
         for _, row_data in df.iterrows():
-            code, name, m_type, age, area, img_p = row_data['member_code'], row_data['name'], row_data['type'], row_data['age_category'], row_data['area'], row_data['image_path']
+            code, name, m_type, age, area, img_p, title = row_data['member_code'], row_data['name'], row_data['type'], row_data['age_category'], row_data['area'], row_data['image_path'], row_data['title']
             row = ctk.CTkFrame(self.member_scroll, fg_color="transparent", height=85)
             row.pack(fill="x", pady=0)
             row.grid_columnconfigure(0, minsize=40); row.grid_columnconfigure(1, minsize=80)
@@ -985,8 +1168,10 @@ class AutoAttendanceApp(ctk.CTk):
             # Name & ID
             info_f = ctk.CTkFrame(row, fg_color="transparent")
             info_f.grid(row=0, column=2, sticky="w", padx=10)
-            ctk.CTkLabel(info_f, text=name, font=("Arial", 15, "bold"), text_color="#1F2937").pack(anchor="w")
-            ctk.CTkLabel(info_f, text=f"ID: {code}  |  Age: {age or '--'}", font=("Arial", 11), text_color="#6B7280").pack(anchor="w")
+            
+            display_name = f"{title} {name}" if title else name
+            ctk.CTkLabel(info_f, text=display_name, font=("Arial", 15, "bold"), text_color="#1F2937").pack(anchor="w")
+            ctk.CTkLabel(info_f, text=f"ID: {code}  |  Age: {age or '--'}  |  Title: {title or '--'}", font=("Arial", 11), text_color="#6B7280").pack(anchor="w")
 
             # Type
             badge_color = "#EBF5FF" if m_type == "Member" else "#F0FDFA"
@@ -1423,7 +1608,7 @@ class AutoAttendanceApp(ctk.CTk):
 
         attendees = conn.execute("""
             SELECT a.id, COALESCE(m.name, a.person_name), a.status, a.check_in_time, a.record_image,
-                   m.age_category, a.member_code, m.area
+                   m.age_category, a.member_code, m.area, m.title
             FROM attendance a
             LEFT JOIN members m ON a.member_code = m.member_code
             WHERE a.session_id = ?
@@ -1523,7 +1708,7 @@ class AutoAttendanceApp(ctk.CTk):
             ctk.CTkLabel(sc, text=title.upper(), font=("Arial", 14, "bold"), text_color="#374151").pack(anchor="w", padx=10, pady=(20, 5))
             ctk.CTkFrame(sc, height=2, fg_color="#E5E7EB").pack(fill="x", padx=10, pady=(0, 10))
 
-            for aid, name, status, ts, img_p, age, m_code, area in attendees_subset:
+            for aid, name, status, ts, img_p, age, m_code, area, title in attendees_subset:
                 row = ctk.CTkFrame(sc, fg_color="#FFFFFF", corner_radius=8, height=80, border_width=1, border_color="#F3F4F6")
                 row.pack(fill="x", pady=4, padx=5)
                 row.pack_propagate(False)
@@ -1542,7 +1727,7 @@ class AutoAttendanceApp(ctk.CTk):
                 info_f = ctk.CTkFrame(row, fg_color="transparent")
                 info_f.pack(side="left", padx=10, fill="y", pady=10)
                 ctk.CTkLabel(info_f, text=name, font=("Arial", 15, "bold"), text_color="#111827").pack(anchor="w")
-                det_txt = f"Age: {age or '--'}  |  Area: {area or 'Unknown'}  |  Time: {str(ts)[11:16]}"
+                det_txt = f"Age: {age or '--'}  |  Title: {title or '--'}  |  Area: {area or 'Unknown'}  |  Time: {str(ts)[11:16]}"
                 ctk.CTkLabel(info_f, text=det_txt, font=("Arial", 11), text_color="#6B7280").pack(anchor="w")
 
                 # Action Links (Identify if Unknown)
@@ -1715,6 +1900,110 @@ class AutoAttendanceApp(ctk.CTk):
             messagebox.showerror("Export Failed", str(e), parent=parent)
 
     # ── Organization Chart ────────────────────────────────────────────────────
+
+    def init_annually_report_page(self):
+        f = ctk.CTkFrame(self.container, fg_color="#F8F9FA", corner_radius=10)
+        self.frames["annually_report"] = f
+        
+        header = ctk.CTkFrame(f, fg_color="transparent")
+        header.pack(fill="x", padx=30, pady=(30, 20))
+        
+        ctk.CTkLabel(header, text="ANNUALLY & PERIODICAL REPORTS", font=("Arial", 24, "bold"), text_color="#111827").pack(anchor="w")
+        ctk.CTkLabel(header, text="Detailed attendance analytics for Friday and Saturday Seminars", font=("Arial", 14), text_color="#6B7280").pack(anchor="w")
+
+        # Top Level: Seminar Type Selection
+        type_frame = ctk.CTkFrame(f, fg_color="transparent")
+        type_frame.pack(fill="x", padx=30, pady=(0, 10))
+        
+        self.report_type_var = ctk.StringVar(value="Combined Total")
+        type_sel = ctk.CTkSegmentedButton(type_frame, values=["Friday Seminar", "Saturday Seminar", "Combined Total"], 
+                                         variable=self.report_type_var, height=40, font=("Arial", 13, "bold"),
+                                         command=lambda _: self.refresh_annually_report())
+        type_sel.pack(fill="x")
+
+        # Sub Level: Period Selection
+        period_frame = ctk.CTkFrame(f, fg_color="transparent")
+        period_frame.pack(fill="x", padx=30, pady=(0, 20))
+        
+        self.report_period_var = ctk.StringVar(value="Monthly")
+        period_sel = ctk.CTkSegmentedButton(period_frame, values=["Weekly", "Monthly", "Yearly"], 
+                                           variable=self.report_period_var, height=35,
+                                           command=lambda _: self.refresh_annually_report())
+        period_sel.pack(anchor="center")
+
+        # Content Area
+        self.annually_table_container = ctk.CTkFrame(f, fg_color="transparent")
+        self.annually_table_container.pack(fill="both", expand=True, padx=30)
+        
+        # Initial load
+        self.after(500, self.refresh_annually_report)
+
+    def refresh_annually_report(self):
+        for w in self.annually_table_container.winfo_children(): w.destroy()
+        
+        p_type = self.report_period_var.get().lower()
+        s_type = self.report_type_var.get()
+        
+        def_area = self.settings.get("default_area", "").strip()
+        df = self.backend.get_periodical_stats(p_type, default_area=def_area)
+        
+        # Table Header
+        table_f = ctk.CTkScrollableFrame(self.annually_table_container, fg_color="#FFFFFF", corner_radius=10, border_width=1, border_color="#E5E7EB")
+        table_f.pack(fill="both", expand=True)
+        
+        headers = ["PERIOD", "PRESENT COUNT", "BROTHER / SISTER", "MEMBER / TRUTH SEEKER", "AREA RATE %", "OVERALL RATE %"]
+        h_f = ctk.CTkFrame(table_f, fg_color="#F9FAFB", height=45)
+        h_f.pack(fill="x", pady=(0, 5))
+        for i, h in enumerate(headers):
+            relx = 0.05 if i == 0 else (0.2 + (i-1) * 0.16)
+            ctk.CTkLabel(h_f, text=h, font=("Arial", 10, "bold"), text_color="#4B5563").place(relx=relx, rely=0.5, anchor="w")
+        
+        if df.empty:
+            ctk.CTkLabel(table_f, text="No seminar records found for the selected filters.", font=("Arial", 13), pady=40).pack()
+            return
+
+        # Map display columns based on selected Seminar Type
+        prefix = "fri" if s_type == "Friday Seminar" else ("sat" if s_type == "Saturday Seminar" else "tot")
+        color = "#2563EB" if s_type == "Friday Seminar" else ("#D97706" if s_type == "Saturday Seminar" else "#059669")
+
+        # Data Rows
+        for _, row in df.iterrows():
+            if row[f'{prefix}_present'] == 0: continue # Skip periods with no data for this specific type
+
+            r_f = ctk.CTkFrame(table_f, fg_color="transparent", height=40)
+            r_f.pack(fill="x")
+            
+            ctk.CTkLabel(r_f, text=str(row['period']), font=("Arial", 12, "bold"), text_color="#111827").place(relx=0.05, rely=0.5, anchor="w")
+            ctk.CTkLabel(r_f, text=str(int(row[f'{prefix}_present'])), font=("Arial", 12)).place(relx=0.2, rely=0.5, anchor="w")
+            ctk.CTkLabel(r_f, text=f"{int(row[f'{prefix}_bro'])} / {int(row[f'{prefix}_sis'])}", font=("Arial", 12)).place(relx=0.36, rely=0.5, anchor="w")
+            ctk.CTkLabel(r_f, text=f"{int(row[f'{prefix}_mbr'])} / {int(row[f'{prefix}_ts'])}", font=("Arial", 12)).place(relx=0.52, rely=0.5, anchor="w")
+            ctk.CTkLabel(r_f, text=f"{row[f'{prefix}_area_rate']:.1f}%", font=("Arial", 12, "bold"), text_color="#2563EB").place(relx=0.68, rely=0.5, anchor="w")
+            ctk.CTkLabel(r_f, text=f"{row[f'{prefix}_overall_rate']:.1f}%", font=("Arial", 12, "bold"), text_color=color).place(relx=0.84, rely=0.5, anchor="w")
+            
+            ctk.CTkFrame(table_f, fg_color="#F3F4F6", height=1).pack(fill="x", padx=10)
+
+        # Summary Average Row
+        avg_f = ctk.CTkFrame(self.annually_table_container, fg_color="#F3F4F6", height=60, corner_radius=10)
+        avg_f.pack(fill="x", pady=(10, 0))
+        
+        # Filter df to only periods with data for this type for meaningful averages
+        sub_df = df[df[f'{prefix}_present'] > 0]
+        if not sub_df.empty:
+            a_pres = sub_df[f'{prefix}_present'].mean()
+            a_bro = sub_df[f'{prefix}_bro'].mean()
+            a_sis = sub_df[f'{prefix}_sis'].mean()
+            a_mbr = sub_df[f'{prefix}_mbr'].mean()
+            a_ts = sub_df[f'{prefix}_ts'].mean()
+            a_area = sub_df[f'{prefix}_area_rate'].mean()
+            a_over = sub_df[f'{prefix}_overall_rate'].mean()
+            
+            ctk.CTkLabel(avg_f, text="AVERAGE:", font=("Arial", 12, "bold")).place(relx=0.05, rely=0.5, anchor="w")
+            ctk.CTkLabel(avg_f, text=f"{a_pres:.1f}", font=("Arial", 12, "bold")).place(relx=0.2, rely=0.5, anchor="w")
+            ctk.CTkLabel(avg_f, text=f"{a_bro:.1f} / {a_sis:.1f}", font=("Arial", 11)).place(relx=0.36, rely=0.5, anchor="w")
+            ctk.CTkLabel(avg_f, text=f"{a_mbr:.1f} / {a_ts:.1f}", font=("Arial", 11)).place(relx=0.52, rely=0.5, anchor="w")
+            ctk.CTkLabel(avg_f, text=f"{a_area:.1f}%", font=("Arial", 12, "bold"), text_color="#2563EB").place(relx=0.68, rely=0.5, anchor="w")
+            ctk.CTkLabel(avg_f, text=f"{a_over:.1f}%", font=("Arial", 12, "bold"), text_color=color).place(relx=0.84, rely=0.5, anchor="w")
+        
 
     def init_org_chart_page(self):
         f = ctk.CTkFrame(self.container, fg_color="#F8F9FA", corner_radius=10)
@@ -2125,7 +2414,7 @@ class AutoAttendanceApp(ctk.CTk):
     # ── Settings ──────────────────────────────────────────────────────────────
 
     def init_settings_page(self):
-        main_f = ctk.CTkFrame(self.container, fg_color="#FFFFFF", corner_radius=10)
+        main_f = ctk.CTkScrollableFrame(self.container, fg_color="#FFFFFF", corner_radius=10)
         self.frames["settings"] = main_f
 
         # Main 2-Column Split
@@ -2166,9 +2455,21 @@ class AutoAttendanceApp(ctk.CTk):
         self.address_entry.pack(pady=(0, 15), anchor="w")
 
         ctk.CTkLabel(left, text="Church Logo:", font=("Arial", 12, "bold")).pack(anchor="w", pady=(5, 2))
-        ctk.CTkButton(left, text="📁 Upload Logo Image", command=self.upload_logo, width=320, height=35, fg_color="#E5E7EB", text_color="#374151", hover_color="#D1D5DB").pack(pady=(0, 25), anchor="w")
+        ctk.CTkButton(left, text="📁 Upload Logo Image", command=self.upload_logo, width=320, height=35, fg_color="#E5E7EB", text_color="#374151", hover_color="#D1D5DB").pack(pady=(0, 20), anchor="w")
 
-        ctk.CTkButton(left, text="💾 Save App Settings", fg_color="#28A745", hover_color="#218838", width=320, height=42, font=("Arial", 13, "bold"), command=self.apply_settings).pack(pady=10, anchor="w")
+        # ── Firewall Management ──
+        ctk.CTkLabel(left, text="Network Security", font=("Arial", 18, "bold"), text_color="#111827").pack(pady=(15, 10), anchor="w")
+        ctk.CTkLabel(left, text="Control the Confidential Data Firewall:", font=("Arial", 11), text_color="gray").pack(anchor="w", pady=(0, 10))
+        
+        self.fw_toggle_var = tk.BooleanVar(value=not FIREWALL_BYPASS)
+        self.fw_switch = ctk.CTkSwitch(left, text="Data Privacy Firewall (Active)", 
+                                       font=("Arial", 12, "bold"),
+                                       progress_color="#10B981",
+                                       variable=self.fw_toggle_var,
+                                       command=self.toggle_firewall_manual)
+        self.fw_switch.pack(pady=10, anchor="w")
+
+        ctk.CTkButton(left, text="💾 Save App Settings", fg_color="#28A745", hover_color="#218838", width=320, height=42, font=("Arial", 13, "bold"), command=self.apply_settings).pack(pady=20, anchor="w")
 
         # ── Right Side: Backup Process ───────────────────────────────────────
         right = ctk.CTkFrame(split, fg_color="transparent")
@@ -2200,7 +2501,147 @@ class AutoAttendanceApp(ctk.CTk):
         self.hint_word_entry.insert(0, self.settings.get("admin_hint", "skudai"))
         self.hint_word_entry.pack(pady=(0, 10), anchor="w")
         
-        ctk.CTkButton(right, text="🛡 Save Security Word", fg_color="#6366F1", hover_color="#4F46E5", width=320, height=38, font=("Arial", 12, "bold"), command=self.update_admin_hint).pack(anchor="w")
+        ctk.CTkButton(right, text="🛡 Save Security Word", fg_color="#6366F1", hover_color="#4F46E5", width=320, height=38, font=("Arial", 12, "bold"), command=self.update_admin_hint).pack(anchor="w", pady=(0, 30))
+
+        # ── GitHub Updates ──
+        ctk.CTkLabel(right, text="Software Updates", font=("Arial", 18, "bold"), text_color="#111827").pack(pady=(10, 10), anchor="w")
+        ctk.CTkLabel(right, text="Sync code with official GitHub repository:", font=("Arial", 11), text_color="gray").pack(anchor="w", pady=(0, 15))
+        
+        ctk.CTkButton(right, text="☁  Update from GitHub", fg_color="#6366F1", hover_color="#4F46E5", width=320, height=45, font=("Arial", 13, "bold"), command=self.update_from_github).pack(pady=5, anchor="w")
+        ctk.CTkLabel(right, text="Note: Requires internet access and Git installed.", font=("Arial", 9), text_color="#9CA3AF").pack(anchor="w")
+
+    def toggle_firewall_manual(self):
+        global FIREWALL_BYPASS
+        # If switch is ON (True), firewall is active -> bypass is FALSE
+        FIREWALL_BYPASS = not self.fw_toggle_var.get()
+        
+        if FIREWALL_BYPASS:
+            self.fw_badge.configure(text="⚠️ Firewall Disabled", fg_color="#FEE2E2", text_color="#EF4444")
+            self.fw_switch.configure(text="Data Privacy Firewall (OFF)")
+            messagebox.showwarning("Security Warning", "Data Privacy Firewall is now DISABLED.\nExternal network connections are now PERMITTED.\n\nOnly use this temporarily if you need to download models or sync data.")
+        else:
+            self.fw_badge.configure(text="🛡️ Firewall Active", fg_color="#D1FAE5", text_color="#059669")
+            self.fw_switch.configure(text="Data Privacy Firewall (Active)")
+            messagebox.showinfo("Security Info", "Data Privacy Firewall is now ACTIVE.\nExternal network connections are now BLOCKED.")
+
+    def update_from_github(self):
+        """Fetches and pulls the latest code from the official GitHub repository."""
+        global FIREWALL_BYPASS
+        
+        # 1. Firewall Check
+        if not FIREWALL_BYPASS:
+            messagebox.showwarning("Firewall Blocked", 
+                                   "The Data Privacy Firewall is currently ACTIVE.\n\n"
+                                   "To download updates from GitHub, you must first switch the 'Data Privacy Firewall' to OFF in Settings.")
+            return
+
+        # 2. Confirmation
+        if not messagebox.askyesno("Confirm Update", 
+                                   "This will download the latest version from GitHub.\n\n"
+                                   "WARNING: Any local code modifications will be replaced by the official version.\n\n"
+                                   "Do you want to proceed?"):
+            return
+
+        import subprocess
+        try:
+            # Check if git is installed
+            subprocess.run(["git", "--version"], check=True, capture_output=True)
+            
+            # 3. Execution
+            # We use git reset --hard origin/main to ensure the local code becomes identical to the server
+            # This is the most reliable way to update for non-developers.
+            subprocess.run(["git", "fetch", "--all"], check=True, cwd=os.getcwd(), capture_output=True)
+            subprocess.run(["git", "reset", "--hard", "origin/main"], check=True, cwd=os.getcwd(), capture_output=True)
+            
+            messagebox.showinfo("Update Success", 
+                                "Application updated successfully to the latest GitHub version!\n\n"
+                                "Please RESTART the application for changes to take effect.")
+        except FileNotFoundError:
+            messagebox.showerror("Update Error", "Git is not installed on this system.\n\nPlease install Git from git-scm.com first.")
+        except subprocess.CalledProcessError as e:
+            err_msg = e.stderr.decode() if e.stderr else str(e)
+            messagebox.showerror("Update Error", f"Failed to update from GitHub:\n{err_msg}")
+        except Exception as e:
+            messagebox.showerror("Update Error", f"An unexpected error occurred:\n{str(e)}")
+
+    # ── SQL Data Page ─────────────────────────────────────────────────────────
+
+    def init_sql_page(self):
+        f = ctk.CTkFrame(self.container, fg_color="#F8F9FA", corner_radius=10)
+        self.frames["sql"] = f
+        
+        hdr = ctk.CTkFrame(f, fg_color="transparent")
+        hdr.pack(fill="x", padx=20, pady=20)
+        
+        ctk.CTkLabel(hdr, text="🗄 SQL Database Management", font=("Arial", 24, "bold")).pack(side="left")
+        
+        ctrl = ctk.CTkFrame(f, fg_color="#FFFFFF", corner_radius=8, border_width=1, border_color="#E5E7EB")
+        ctrl.pack(fill="x", padx=20, pady=(0, 15))
+        
+        ctk.CTkLabel(ctrl, text="Table:", font=("Arial", 12, "bold")).pack(side="left", padx=(20, 5), pady=15)
+        self.sql_table_var = ctk.StringVar(value="members")
+        self.sql_table_cb = ctk.CTkComboBox(ctrl, variable=self.sql_table_var, values=["members", "attendance", "sessions", "org_charts"], command=lambda _: self.refresh_sql_table())
+        self.sql_table_cb.pack(side="left", padx=5)
+        
+        ctk.CTkButton(ctrl, text="🔄 Refresh", width=100, command=self.refresh_sql_table).pack(side="left", padx=20)
+        
+        # Add Column Tool
+        ctk.CTkLabel(ctrl, text="Add New Column:", font=("Arial", 11, "bold")).pack(side="left", padx=(40, 5))
+        self.new_col_name = ctk.CTkEntry(ctrl, width=150, placeholder_text="column_name")
+        self.new_col_name.pack(side="left", padx=5)
+        ctk.CTkButton(ctrl, text="+ Add", width=60, fg_color="#10B981", command=self.on_sql_add_column).pack(side="left", padx=5)
+
+        self.sql_scroll = ctk.CTkScrollableFrame(f, fg_color="#FFFFFF", corner_radius=8, border_width=1, border_color="#E5E7EB")
+        self.sql_scroll.pack(fill="both", expand=True, padx=20, pady=(0, 20))
+        
+    def on_sql_add_column(self):
+        col = self.new_col_name.get().strip().replace(" ", "_")
+        table = self.sql_table_var.get()
+        if not col: return
+        
+        if messagebox.askyesno("Confirm", f"Add column '{col}' to table '{table}'?"):
+            try:
+                conn = sqlite3.connect("database/attendance.db")
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} TEXT")
+                conn.commit()
+                conn.close()
+                messagebox.showinfo("Success", f"Column '{col}' added successfully.")
+                self.new_col_name.delete(0, 'end')
+                self.refresh_sql_table()
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to add column: {e}")
+
+    def refresh_sql_table(self):
+        for w in self.sql_scroll.winfo_children(): w.destroy()
+        
+        table = self.sql_table_var.get()
+        conn = sqlite3.connect("database/attendance.db")
+        cursor = conn.cursor()
+        try:
+            cursor.execute(f"SELECT * FROM {table} LIMIT 100")
+            rows = cursor.fetchall()
+            cols = [description[0] for description in cursor.description]
+            conn.close()
+        except:
+            conn.close()
+            return
+
+        # Header
+        h_f = ctk.CTkFrame(self.sql_scroll, fg_color="#F3F4F6", height=40)
+        h_f.pack(fill="x", pady=(0, 5))
+        for i, c in enumerate(cols):
+            ctk.CTkLabel(h_f, text=c.upper(), font=("Arial", 10, "bold"), text_color="#374151").place(x=10 + i*150, y=10)
+
+        # Rows
+        for r_idx, row_data in enumerate(rows):
+            r_f = ctk.CTkFrame(self.sql_scroll, fg_color="transparent", height=35)
+            r_f.pack(fill="x")
+            for c_idx, val in enumerate(row_data):
+                txt = str(val) if val is not None else ""
+                if len(txt) > 20: txt = txt[:17] + "..."
+                ctk.CTkLabel(r_f, text=txt, font=("Arial", 11)).place(x=10 + c_idx*150, y=5)
+            
+            ctk.CTkFrame(self.sql_scroll, height=1, fg_color="#E5E7EB").pack(fill="x")
 
     def update_admin_hint(self):
         nh = self.hint_word_entry.get().strip()
@@ -2424,7 +2865,7 @@ class AutoAttendanceApp(ctk.CTk):
     def on_start_click(self):
         popup = ctk.CTkToplevel(self)
         popup.title("Start Attendance Session")
-        popup.geometry("420x280")
+        popup.geometry("420x400")
         popup.attributes("-topmost", True)
         popup.grab_set()
 
@@ -2439,11 +2880,20 @@ class AutoAttendanceApp(ctk.CTk):
 
         ctk.CTkLabel(popup, text="Duration in MINUTES (leave blank = manual stop):", anchor="w").pack(fill="x", padx=30)
         dur_e = ctk.CTkEntry(popup, width=340, placeholder_text="e.g.  60  (for 1 hour)")
-        dur_e.pack(padx=30, pady=(4, 16))
+        dur_e.pack(padx=30, pady=(4, 12))
+
+        ctk.CTkLabel(popup, text="Seminar Type (for periodical reporting):", anchor="w").pack(fill="x", padx=30)
+        sem_var = ctk.StringVar(value="Other")
+        if dt.strftime('%A') == 'Friday': sem_var.set("Friday Seminar")
+        elif dt.strftime('%A') == 'Saturday': sem_var.set("Saturday Seminar")
+        
+        sem_menu = ctk.CTkSegmentedButton(popup, values=["Other", "Friday Seminar", "Saturday Seminar"], variable=sem_var)
+        sem_menu.pack(padx=30, pady=(4, 20), fill="x")
 
         def confirm():
             title = title_e.get().strip()
             dur   = dur_e.get().strip()
+            stype = sem_var.get()
             if not title:
                 messagebox.showwarning("Missing", "Please enter a title.", parent=popup)
                 return
@@ -2459,7 +2909,7 @@ class AutoAttendanceApp(ctk.CTk):
                                            parent=popup)
                     return
 
-            self.backend.start_session(title, dur_mins)
+            self.backend.start_session(title, dur_mins, seminar_type=stype)
             self.session_title    = title
             self.session_deadline = (datetime.now() + timedelta(minutes=dur_mins)) if dur_mins else None
 
@@ -2650,25 +3100,24 @@ class AutoAttendanceApp(ctk.CTk):
         populate_list()
 
     def do_manual_mark(self, code, name, mtype):
-        # Fetch profile image to use as record image
+        # Fetch profile image and title
         conn = sqlite3.connect("database/attendance.db")
-        p_img = conn.execute("SELECT image_path FROM members WHERE member_code=?", (code,)).fetchone()[0]
+        row = conn.execute("SELECT image_path, title FROM members WHERE member_code=?", (code,)).fetchone()
         conn.close()
+        p_img = row[0] if row else ""
+        m_title = row[1] if row else ""
 
         # Mark in backend
-        # We need a new backend method for manual marking to avoid camera requirements
         if hasattr(self.backend, "manual_mark"):
             ok, path = self.backend.manual_mark(name, code, p_img, mtype)
         else:
-            # Fallback if backend isn't updated yet
             ok, path = self.backend.mark_attendance(name, code, None, mtype)
 
         if ok:
             self.refresh_stats()
-            self.activity_log.insert("1.0", f"[{datetime.now().strftime('%H:%M')}] ✅ {name} (MANUAL)\n")
-            # Card addition is usually handled by update_camera's result queue, 
-            # but for manual we add it immediately
-            self.add_attendee_card(name, p_img, mtype, code)
+            self.activity_log.insert("1.0", f"[{datetime.now().strftime('%H:%M')}] ✅ {m_title} {name} (MANUAL)\n")
+            # Card addition
+            self.add_attendee_card(name, p_img, mtype, code, title=m_title)
 
     # ── Thread-Safe GUI Updates ───────────────────────────────────────────────
 
@@ -2702,7 +3151,7 @@ class AutoAttendanceApp(ctk.CTk):
             self.refresh_stats()
             messagebox.showinfo("Success", f"Member {code} removed from session.")
 
-    def add_attendee_card(self, name, img_path, m_type, code):
+    def add_attendee_card(self, name, img_path, m_type, code, title=""):
         # Prevent duplicates
         for child in self.checkin_scroll.winfo_children():
             if hasattr(child, "member_code") and child.member_code == code:
@@ -2733,7 +3182,7 @@ class AutoAttendanceApp(ctk.CTk):
         txt_f.pack(side="left", fill="both", expand=True, padx=5)
         
         ctk.CTkLabel(txt_f, text=name.upper(), font=("Arial", 12, "bold"), anchor="w").pack(pady=(8, 0), fill="x")
-        ctk.CTkLabel(txt_f, text=f"ID: {code}", font=("Arial", 10), text_color="#6B7280", anchor="w").pack(fill="x")
+        ctk.CTkLabel(txt_f, text=f"ID: {code}  |  {title}", font=("Arial", 10), text_color="#6B7280", anchor="w").pack(fill="x")
 
         # [3] Status and Time
         right_f = ctk.CTkFrame(card, fg_color="transparent")
@@ -2807,9 +3256,10 @@ class AutoAttendanceApp(ctk.CTk):
 
                             ts = datetime.now().strftime("%H:%M")
                             if res['name'] != "Unknown":
-                                self.activity_log.insert("end", f"[{ts}] ✅ {res['name']} ({res['type']})\n")
+                                m_title = res.get('title', '')
+                                self.activity_log.insert("end", f"[{ts}] ✅ {m_title} {res['name']} ({res['type']})\n")
                                 if res.get('new'):
-                                    self.add_attendee_card(res['name'], res['img'], res['type'], res['code'])
+                                    self.add_attendee_card(res['name'], res['img'], res['type'], res['code'], title=m_title)
                             else:
                                 self.activity_log.insert("end", f"[{ts}] ❓ Unknown face captured\n")
                                 if res.get('new'):
@@ -2891,10 +3341,9 @@ class AutoAttendanceApp(ctk.CTk):
 
         def on_member_selected(code):
             conn = sqlite3.connect("database/attendance.db")
-            m = conn.execute("SELECT name, type, dob, area, phone, baptism_date, address, email, has_holy_spirit FROM members WHERE member_code=?", (code,)).fetchone()
+            m = conn.execute("SELECT name, type, dob, area, phone, baptism_date, address, email, has_holy_spirit, title FROM members WHERE member_code=?", (code,)).fetchone()
             conn.close()
             if m:
-                # Fill fields: name, type, dob, area, phone, bap, addr, email, hs
                 name_e.delete(0, "end");   name_e.insert(0, m[0] or "")
                 type_cb.set(m[1] or "Member")
                 set_dob(m[2] or "")
@@ -2904,6 +3353,7 @@ class AutoAttendanceApp(ctk.CTk):
                 address_e.delete(0, "end"); address_e.insert(0, m[6] or "")
                 email_e.delete(0, "end"); email_e.insert(0, m[7] or "")
                 hs_var.set(bool(m[8]))
+                title_cb.set(m[9] or "")
                 
                 # Switch to link mode
                 action_var.set("link_existing")
@@ -2916,6 +3366,11 @@ class AutoAttendanceApp(ctk.CTk):
         ctk.CTkLabel(form, text="Name *", font=("Arial", 11, "bold")).pack(anchor="w", pady=(15, 0))
         name_e = ctk.CTkEntry(form, width=360)
         name_e.pack(pady=3, fill="x")
+
+        ctk.CTkLabel(form, text="Title", font=("Arial", 11, "bold")).pack(anchor="w", pady=(8, 0))
+        title_var = ctk.StringVar(value="")
+        title_cb = ctk.CTkComboBox(form, variable=title_var, values=["", "Brother", "Sister"], width=360)
+        title_cb.pack(pady=3, fill="x")
 
         ctk.CTkLabel(form, text="Type (Member / Truth Seeker)", font=("Arial", 11, "bold")).pack(anchor="w", pady=(8, 0))
         type_var = ctk.StringVar(value="Member")
@@ -2997,13 +3452,38 @@ class AutoAttendanceApp(ctk.CTk):
                 if not code:
                     messagebox.showwarning("Missing", "Member code required.", parent=popup)
                     return
-                # Promote attendance row
-                self.backend.identify_unknown(att_id, name, code, m_type.lower())
+                try:
+                    # Update member title/details if needed
+                    self.backend.register_member({"name": name, "title": title_cb.get(), "type": m_type}, force_code=code)
+                    # Promote attendance row
+                    self.backend.identify_unknown(att_id, name, code, m_type.lower())
+                except Exception as e:
+                    messagebox.showerror("Save Error", f"Could not update member record: {str(e)}", parent=popup)
+                    return
             else:
                 # Register brand-new member
+                # Load extra fields schema
+                extra_entries = {}
+                conn = sqlite3.connect("database/attendance.db")
+                cursor = conn.cursor()
+                cursor.execute("PRAGMA table_info(members)")
+                db_cols = [row[1] for row in cursor.fetchall()]
+                conn.close()
+                
+                standard_fields = ["member_code", "name", "type", "age", "dob", "baptism_date", 
+                                   "address", "email", "phone", "has_holy_spirit", "image_path", 
+                                   "registration_date", "area", "remark", "age_category"]
+                extra_fields = [c for c in db_cols if c not in standard_fields]
+                
+                # Show extra fields in UI before save (optional, but requested to reflect)
+                # For this quick popup, we'll just gather them if they were somehow in the form
+                # Actually, the user wants "add here will reflect to default list"
+                # So I should probably add them to the register_member_popup too.
+                
                 data = {
                     "name": name,
                     "type": m_type,
+                    "title": title_var.get(),
                     "dob":  get_dob(),
                     "baptism_date": get_bap(),
                     "area": area_e.get().strip(),
@@ -3024,7 +3504,7 @@ class AutoAttendanceApp(ctk.CTk):
             
             # Show in captured list right away
             if code and m_type:
-                self.add_attendee_card(name, img_path, m_type, code)
+                self.add_attendee_card(name, img_path, m_type, code, title=title_var.get())
                 
             popup.destroy()
             messagebox.showinfo("Done", f"Person identified as '{name}' (code: {code}).")
@@ -3174,19 +3654,26 @@ class AutoAttendanceApp(ctk.CTk):
 
         # Load existing
         existing = {}
-        if code:
-            conn = sqlite3.connect("database/attendance.db")
-            row  = conn.execute("SELECT * FROM members WHERE member_code=?", (code,)).fetchone()
-            conn.close()
-            if row:
-                # col order: code,name,type,age,dob,baptism,address,email,phone,hs,img,reg,area
-                existing = {"name": row[1], "type": row[2], "dob": row[4],
-                            "baptism_date": row[5], "address": row[6],
-                            "email": row[7], "phone": row[8],
-                            "has_holy_spirit": row[9],
-                            "image_path": row[10],
-                            "area": row[12] if len(row) > 12 else "",
-                            "remark": row[13] if len(row) > 13 else ""}
+        db_cols = []
+        conn = sqlite3.connect("database/attendance.db")
+        try:
+            # Get columns dynamically
+            cursor = conn.cursor()
+            cursor.execute("PRAGMA table_info(members)")
+            db_cols = [row[1] for row in cursor.fetchall()]
+            
+            if code:
+                # Use pandas for easy dict conversion
+                df = pd.read_sql("SELECT * FROM members WHERE member_code=?", conn, params=[code])
+                if not df.empty:
+                    existing = df.iloc[0].to_dict()
+        except: pass
+        finally: conn.close()
+
+        standard_fields = ["member_code", "name", "type", "age", "dob", "baptism_date", 
+                           "address", "email", "phone", "has_holy_spirit", "image_path", 
+                           "registration_date", "area", "remark", "age_category"]
+        extra_fields = [c for c in db_cols if c not in standard_fields]
 
         # ── Profile Photo ──────────────────────────────────────────────────────
         self.dialog_img_path = existing.get("image_path", "")
@@ -3236,6 +3723,14 @@ class AutoAttendanceApp(ctk.CTk):
         name_e.insert(0, existing.get("name", ""))
         if readonly: name_e.configure(state="disabled")
         name_e.pack(pady=4)
+
+        # ── Title selection ───────────────────────────────────────────────────
+        ctk.CTkLabel(scroll, text="Title", font=("Arial", 12, "bold")).pack(anchor="w", pady=(10, 0))
+        title_var = ctk.StringVar(value=existing.get("title", "") or "")
+        title_cb = ctk.CTkComboBox(scroll, variable=title_var,
+                                    values=["", "Brother", "Sister"],
+                                    width=400, state="disabled" if readonly else "normal")
+        title_cb.pack(pady=4)
 
         # ── Type dropdown ─────────────────────────────────────────────────────
         ctk.CTkLabel(scroll, text="Type", font=("Arial", 12, "bold")).pack(anchor="w", pady=(10, 0))
@@ -3309,11 +3804,26 @@ class AutoAttendanceApp(ctk.CTk):
             if readonly: remark_e.configure(state="disabled")
             remark_e.pack(pady=4)
 
+        # ── Extra Fields (SQL Custom) ──
+        extra_entries = {}
+        if extra_fields:
+            ctk.CTkFrame(scroll, height=2, fg_color="#E5E7EB").pack(fill="x", pady=20)
+            ctk.CTkLabel(scroll, text="🛡️ Extra Information (Custom SQL Fields)", font=("Arial", 13, "bold"), text_color="#6366F1").pack(anchor="w", pady=(0, 10))
+            
+            for f_name in extra_fields:
+                ctk.CTkLabel(scroll, text=f_name.replace("_", " ").upper(), font=("Arial", 11, "bold")).pack(anchor="w", pady=(8, 0))
+                ent = ctk.CTkEntry(scroll, width=400)
+                ent.insert(0, str(existing.get(f_name, "")) if existing.get(f_name) is not None else "")
+                ent.pack(pady=4)
+                extra_entries[f_name] = ent
+                if readonly: ent.configure(state="disabled")
+
         if not readonly:
             def save():
                 data = {
                     "name":          name_e.get().strip(),
                     "type":          type_var.get(),
+                    "title":         title_var.get(),
                     "dob":           get_dob(),
                     "baptism_date":  get_bap(),
                     "area":          area_e.get().strip(),
@@ -3325,12 +3835,22 @@ class AutoAttendanceApp(ctk.CTk):
                     "remark":        remark_e.get("1.0", "end").strip(),
                     "age_category":  age_cat_var.get(),
                 }
+                # Collect extra fields
+                for f_name, ent in extra_entries.items():
+                    data[f_name] = ent.get().strip()
                 if not data["name"]:
                     messagebox.showwarning("Missing", "Name is required.", parent=dialog)
                     return
                 # Use prefix if brand new member
                 prefix = self.settings.get("member_prefix", "") if not code else ""
-                self.backend.register_member(data, force_code=code, prefix=prefix)
+                try:
+                    # Collect title directly from widget to be sure
+                    data["title"] = title_cb.get()
+                    self.backend.register_member(data, force_code=code, prefix=prefix)
+                except Exception as e:
+                    messagebox.showerror("Save Error", f"Backend failure: {str(e)}", parent=dialog)
+                    return
+                
                 self.refresh_member_table()
                 dialog.destroy()
 

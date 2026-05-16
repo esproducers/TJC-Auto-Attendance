@@ -101,7 +101,8 @@ class ReportGenerator:
                 df = pd.read_sql(f"""
                     SELECT COALESCE(m.member_code, a.member_code) AS ID,
                            COALESCE(m.name, a.person_name)        AS Name,
-                           COALESCE(m.age, '')                    AS Age,
+                           COALESCE(m.age_category, '')           AS Age,
+                           COALESCE(m.title, '')                  AS Title,
                            COALESCE(m.type, a.status)             AS Type,
                            a.check_in_time                        AS CheckIn,
                            a.status                               AS Status,
@@ -212,7 +213,8 @@ class ReportGenerator:
         df = pd.read_sql("""
             SELECT COALESCE(m.member_code, a.member_code) AS ID,
                    COALESCE(m.name, a.person_name)        AS Name,
-                   COALESCE(m.age, '')                    AS Age,
+                   COALESCE(m.age_category, '')           AS Age,
+                   COALESCE(m.title, '')                  AS Title,
                    COALESCE(m.type, a.status)             AS Type,
                    m.area                                 AS Area,
                    a.check_in_time                        AS CheckIn,
@@ -296,18 +298,20 @@ class ReportGenerator:
         pdf.set_font("Arial", 'B', 10)
         
         # Table Header
-        pdf.cell(25, 9, "Code", 1, 0, 'C', True)
-        pdf.cell(60, 9, "Name", 1, 0, 'C', True)
+        pdf.cell(20, 9, "Code", 1, 0, 'C', True)
+        pdf.cell(50, 9, "Name", 1, 0, 'C', True)
         pdf.cell(20, 9, "Age",  1, 0, 'C', True)
-        pdf.cell(40, 9, "Type", 1, 0, 'C', True)
+        pdf.cell(20, 9, "Title", 1, 0, 'C', True)
+        pdf.cell(35, 9, "Type", 1, 0, 'C', True)
         pdf.cell(45, 9, "Area", 1, 1, 'C', True)
         
         pdf.set_font("Arial", size=9)
         for _, row in df.iterrows():
-            pdf.cell(25, 8, str(row['ID'])[:12], 1)
-            pdf.cell(60, 8, str(row['Name'])[:30], 1)
+            pdf.cell(20, 8, str(row['ID'])[:12], 1)
+            pdf.cell(50, 8, str(row['Name'])[:30], 1)
             pdf.cell(20, 8, str(row['Age']), 1, 0, 'C')
-            pdf.cell(40, 8, str(row['Type']).capitalize(), 1)
+            pdf.cell(20, 8, str(row['Title']), 1, 0, 'C')
+            pdf.cell(35, 8, str(row['Type']).capitalize(), 1)
             pdf.cell(45, 8, str(row['Area'] or 'Unknown')[:20], 1)
             pdf.ln()
 
@@ -320,7 +324,7 @@ class ReportGenerator:
         conn = sqlite3.connect(self.db_path)
         ph = ",".join("?" * len(member_ids))
         query = f"""
-            SELECT member_code as 'Member ID', name as 'Name', type as 'Type', age_category as 'Age Category', 
+            SELECT member_code as 'Member ID', name as 'Name', title as 'Title', type as 'Type', age_category as 'Age Category', 
                    dob as 'Date of Birth', area as 'Area', address as 'Address', 
                    phone as 'Phone', email as 'Email', baptism_date as 'Date of Baptism',
                    CASE WHEN has_holy_spirit = 1 THEN 'Yes' ELSE 'No' END as 'Has Holy Spirit',
@@ -338,7 +342,7 @@ class ReportGenerator:
         """Export member directory/list to PDF with profile cards."""
         conn = sqlite3.connect(self.db_path)
         ph = ",".join("?" * len(member_ids))
-        query = f"SELECT member_code, name, type, age_category, area, address, phone, email, dob, baptism_date, has_holy_spirit, image_path, remark FROM members WHERE member_code IN ({ph})"
+        query = f"SELECT member_code, name, type, age_category, area, address, phone, email, dob, baptism_date, has_holy_spirit, image_path, remark, title FROM members WHERE member_code IN ({ph})"
         rows = conn.execute(query, member_ids).fetchall()
         conn.close()
 
@@ -349,7 +353,8 @@ class ReportGenerator:
                 "code": r[0], "name": r[1], "type": r[2], "age": r[3], "area": r[4],
                 "address": r[5], "phone": r[6], "email": r[7], "dob": r[8],
                 "baptism_date": r[9], "has_holy_spirit": r[10], "image": r[11],
-                "remark": r[12] if len(r) > 12 else ""
+                "remark": r[12] if len(r) > 12 else "",
+                "title": r[13] if len(r) > 13 else ""
             }
             
             pdf.add_page()
@@ -407,6 +412,7 @@ class ReportGenerator:
 
             add_detail_row("Member ID", m["code"], True)
             add_detail_row("Type", m["type"])
+            add_detail_row("Title", m["title"])
             add_detail_row("Age Category", m["age"])
             add_detail_row("Area", m["area"])
             add_detail_row("Date of Birth", m["dob"])
@@ -617,3 +623,102 @@ class ReportGenerator:
 
         pdf.output(out_path)
         return out_path
+
+    def generate_periodical_report(self, period_type='weekly', default_area=None):
+        """Generates an Excel report for Friday/Saturday seminars grouped by week, month, or year."""
+        import pandas as pd
+        import sqlite3
+        conn = sqlite3.connect(self.db_path)
+        
+        total_sys_m = conn.execute("SELECT COUNT(*) FROM members WHERE type='Member'").fetchone()[0]
+        if default_area:
+            da = default_area.strip().lower()
+            area_m_total = conn.execute("SELECT COUNT(*) FROM members WHERE type='Member' AND LOWER(TRIM(area))=?", (da,)).fetchone()[0]
+        else:
+            da = None
+            area_m_total = total_sys_m
+
+        if period_type == 'weekly':
+            date_fmt = '%Y-W%W'
+        elif period_type == 'monthly':
+            date_fmt = '%Y-%m'
+        else:
+            date_fmt = '%Y'
+            
+        query = f"""
+            SELECT 
+                strftime('{date_fmt}', s.date) as Period,
+                
+                -- Friday
+                COUNT(CASE WHEN s.seminar_type = 'Friday Seminar' THEN a.id END) as Fri_Present,
+                SUM(CASE WHEN s.seminar_type = 'Friday Seminar' AND m.title = 'Brother' THEN 1 ELSE 0 END) as Fri_Bro,
+                SUM(CASE WHEN s.seminar_type = 'Friday Seminar' AND m.title = 'Sister' THEN 1 ELSE 0 END) as Fri_Sis,
+                SUM(CASE WHEN s.seminar_type = 'Friday Seminar' AND m.type = 'Member' THEN 1 ELSE 0 END) as Fri_Mbr,
+                SUM(CASE WHEN s.seminar_type = 'Friday Seminar' AND m.type LIKE '%Truth%' THEN 1 ELSE 0 END) as Fri_TS,
+                SUM(CASE WHEN s.seminar_type = 'Friday Seminar' AND m.type = 'Member' AND LOWER(TRIM(m.area)) = ? THEN 1 ELSE 0 END) as Fri_Area_Present,
+                COUNT(DISTINCT CASE WHEN s.seminar_type = 'Friday Seminar' THEN s.id END) as Fri_Sess_Count,
+
+                -- Saturday
+                COUNT(CASE WHEN s.seminar_type = 'Saturday Seminar' THEN a.id END) as Sat_Present,
+                SUM(CASE WHEN s.seminar_type = 'Saturday Seminar' AND m.title = 'Brother' THEN 1 ELSE 0 END) as Sat_Bro,
+                SUM(CASE WHEN s.seminar_type = 'Saturday Seminar' AND m.title = 'Sister' THEN 1 ELSE 0 END) as Sat_Sis,
+                SUM(CASE WHEN s.seminar_type = 'Saturday Seminar' AND m.type = 'Member' THEN 1 ELSE 0 END) as Sat_Mbr,
+                SUM(CASE WHEN s.seminar_type = 'Saturday Seminar' AND m.type LIKE '%Truth%' THEN 1 ELSE 0 END) as Sat_TS,
+                SUM(CASE WHEN s.seminar_type = 'Saturday Seminar' AND m.type = 'Member' AND LOWER(TRIM(m.area)) = ? THEN 1 ELSE 0 END) as Sat_Area_Present,
+                COUNT(DISTINCT CASE WHEN s.seminar_type = 'Saturday Seminar' THEN s.id END) as Sat_Sess_Count,
+
+                -- Combined
+                COUNT(a.id) as Tot_Present,
+                SUM(CASE WHEN m.title = 'Brother' THEN 1 ELSE 0 END) as Tot_Bro,
+                SUM(CASE WHEN m.title = 'Sister' THEN 1 ELSE 0 END) as Tot_Sis,
+                SUM(CASE WHEN m.type = 'Member' THEN 1 ELSE 0 END) as Tot_Mbr,
+                SUM(CASE WHEN m.type LIKE '%Truth%' THEN 1 ELSE 0 END) as Tot_TS,
+                SUM(CASE WHEN m.type = 'Member' AND LOWER(TRIM(m.area)) = ? THEN 1 ELSE 0 END) as Tot_Area_Present,
+                COUNT(DISTINCT s.id) as Tot_Sess_Count
+
+            FROM sessions s
+            JOIN attendance a ON a.session_id = s.id
+            LEFT JOIN members m ON a.member_code = m.member_code
+            WHERE s.seminar_type IN ('Friday Seminar', 'Saturday Seminar')
+            GROUP BY Period
+            ORDER BY Period DESC
+        """
+        
+        df = pd.read_sql(query, conn, params=[da, da, da])
+        conn.close()
+
+        if df.empty:
+            return None
+
+        # Format Period strings for readability
+        def format_p(p):
+            try:
+                if period_type == 'weekly':
+                    y, w = p.split('-W')
+                    return f"Week {w}, {y}"
+                elif period_type == 'monthly':
+                    dt = datetime.strptime(p, '%Y-%m')
+                    return dt.strftime('%b %Y').upper()
+                return p
+            except: return p
+        df['Period'] = df['Period'].apply(format_p)
+
+        # Add rates and formatting
+        df['Fri_Area_Rate%'] = (df['Fri_Area_Present'] / (area_m_total * df['Fri_Sess_Count'].replace(0, 1)) * 100).fillna(0).round(1)
+        df['Fri_Overall_Rate%'] = (df['Fri_Mbr'] / (total_sys_m * df['Fri_Sess_Count'].replace(0, 1)) * 100).fillna(0).round(1)
+        
+        df['Sat_Area_Rate%'] = (df['Sat_Area_Present'] / (area_m_total * df['Sat_Sess_Count'].replace(0, 1)) * 100).fillna(0).round(1)
+        df['Sat_Overall_Rate%'] = (df['Sat_Mbr'] / (total_sys_m * df['Sat_Sess_Count'].replace(0, 1)) * 100).fillna(0).round(1)
+        
+        df['Tot_Area_Rate%'] = (df['Tot_Area_Present'] / (area_m_total * df['Tot_Sess_Count']) * 100).fillna(0).round(1)
+        df['Tot_Overall_Rate%'] = (df['Tot_Mbr'] / (total_sys_m * df['Tot_Sess_Count']) * 100).fillna(0).round(1)
+
+        # Cleanup internal helper columns
+        df = df.drop(columns=['Fri_Sess_Count', 'Sat_Sess_Count', 'Tot_Sess_Count', 
+                             'Fri_Area_Present', 'Sat_Area_Present', 'Tot_Area_Present'])
+
+        # Save to file
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"reports/Seminar_{period_type.capitalize()}_Report_{timestamp}.xlsx"
+        df.to_excel(filename, index=False)
+        return filename
