@@ -1,7 +1,8 @@
+import os
+os.environ["OPENCV_LOG_LEVEL"] = "SILENT"
 import cv2
 import sqlite3
 import pickle
-import os
 import shutil
 import zipfile
 import json
@@ -34,8 +35,11 @@ class InsightFaceAttendance:
         # Camera
         self.current_camera_id = camera_id
         self.camera = cv2.VideoCapture(self.current_camera_id)
-        self.camera.set(cv2.CAP_PROP_FRAME_WIDTH,  1920)
-        self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
+        try:
+            self.camera.set(cv2.CAP_PROP_FRAME_WIDTH,  1920)
+            self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
+        except Exception:
+            pass
 
         # InsightFace (Portable: root='./models' lets you keep the AI files in the project folder)
         self.face_app = insightface.app.FaceAnalysis(name='buffalo_l', root='./models')
@@ -59,8 +63,11 @@ class InsightFaceAttendance:
             self.camera.release()
         self.current_camera_id = camera_id
         self.camera = cv2.VideoCapture(self.current_camera_id)
-        self.camera.set(cv2.CAP_PROP_FRAME_WIDTH,  1920)
-        self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
+        try:
+            self.camera.set(cv2.CAP_PROP_FRAME_WIDTH,  1920)
+            self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
+        except Exception:
+            pass
         return self.camera.isOpened()
 
     def prepare(self, ctx_id=-1, det_size=(640, 640)):
@@ -197,6 +204,10 @@ class InsightFaceAttendance:
         c.execute("CREATE INDEX IF NOT EXISTS idx_attendance_sid ON attendance(session_id)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_attendance_time ON attendance(check_in_time DESC)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_members_name ON members(name)")
+
+        # One-time migration: change old 'Member' / 'member' type to 'Area Member'
+        c.execute("UPDATE members SET type = 'Area Member' WHERE type = 'Member' OR type = 'member'")
+        c.execute("UPDATE attendance SET status = 'Area Member' WHERE status = 'Member' OR status = 'member'")
 
         conn.commit()
         conn.close()
@@ -409,7 +420,7 @@ class InsightFaceAttendance:
             
             final_data = {
                 "member_code": code, "registration_date": str(date.today()),
-                "name": data.get('name', ''), "type": data.get('type', 'Member'),
+                "name": data.get('name', ''), "type": data.get('type', 'Area Member'),
                 "age": age, "dob": data.get('dob'), "baptism_date": data.get('baptism_date'),
                 "address": data.get('address'), "email": data.get('email'), "phone": data.get('phone'),
                 "has_holy_spirit": 1 if data.get('has_holy_spirit') else 0,
@@ -488,7 +499,7 @@ class InsightFaceAttendance:
 
     # ── Attendance marking ────────────────────────────────────────────────────
 
-    def mark_attendance(self, name, member_code, frame, m_type='member', bbox=None):
+    def mark_attendance(self, name, member_code, frame, m_type='Area Member', bbox=None):
         """Returns (new_capture: bool, save_path: str)"""
         if not self.active_session_id:
             return False, None
@@ -598,7 +609,7 @@ class InsightFaceAttendance:
         conn = sqlite3.connect(self.db_path)
         conn.execute(
             "UPDATE attendance SET person_name=?,member_code=?,status=? WHERE id=?",
-            (name, member_code, m_type.lower(), attendance_id))
+            (name, member_code, m_type, attendance_id))
         conn.commit()
         conn.close()
         
@@ -641,7 +652,7 @@ class InsightFaceAttendance:
                     row    = conn.execute("SELECT type, title FROM members WHERE member_code=?",
                                          (match_code,)).fetchone()
                     conn.close()
-                    m_type  = (row[0].lower() if row else 'member')
+                    m_type  = (row[0].lower() if row else 'area member')
                     m_title = (row[1] if row else '')
 
                     # Always add to results for visual display
@@ -723,17 +734,8 @@ class InsightFaceAttendance:
 
     def get_summary(self, default_area=None):
         conn = sqlite3.connect(self.db_path)
-        total_members = conn.execute("SELECT COUNT(*) FROM members").fetchone()[0]
-
-        # Area-specific member count
-        if default_area and default_area.strip():
-            da = default_area.strip().lower()
-            area_total = conn.execute(
-                "SELECT COUNT(*) FROM members WHERE LOWER(TRIM(area))=?",
-                (da,)).fetchone()[0]
-        else:
-            da = None
-            area_total = total_members
+        # Denominator: Total 'Area Member' DB count
+        area_total = conn.execute("SELECT COUNT(*) FROM members WHERE type='Area Member'").fetchone()[0]
 
         if self.active_session_id:
             sid = self.active_session_id
@@ -751,32 +753,29 @@ class InsightFaceAttendance:
                 ORDER  BY a.check_in_time DESC
             """, conn, params=[sid])
 
-            p_members = int((df['status'].str.lower() == 'member').sum())   if not df.empty else 0
-            p_truth   = int(df['status'].str.lower().str.contains('truth', na=False).sum()) if not df.empty else 0
-            waiting   = int((df['status'].str.lower() == 'unknown').sum())  if not df.empty else 0
-            present   = p_members + p_truth
+            p_area_member = int(df['type'].str.lower().isin(['area member']).sum()) if not df.empty else 0
+            p_other_member = int(df['type'].str.lower().isin(['other area member']).sum()) if not df.empty else 0
+            p_truth = int(df['type'].str.lower().str.contains('truth', na=False).sum()) if not df.empty else 0
+            waiting = int((df['type'].str.lower() == 'unknown').sum()) if not df.empty else 0
+            present = p_area_member + p_other_member + p_truth
 
-            # Area rate: people from default area present / total area members
-            if da and not df.empty:
-                area_present = int(df['area'].apply(lambda x: str(x).strip().lower() == da if x else False).sum())
-            else:
-                area_present = present
-            area_rate    = (area_present  / area_total    * 100) if area_total    > 0 else 0
-            overall_rate = (present       / total_members * 100) if total_members > 0 else 0
+            area_rate    = (p_area_member  / area_total    * 100) if area_total    > 0 else 0
+            overall_rate = (present       / area_total    * 100) if area_total    > 0 else 0
         else:
-            present = p_members = p_truth = waiting = area_present = 0
+            present = p_area_member = p_other_member = p_truth = waiting = 0
             area_rate = overall_rate = 0.0
             df = pd.DataFrame()
 
         conn.close()
         return {
-            "p_total":      present,
-            "p_members":    p_members,
-            "p_truth":      p_truth,
-            "waiting":      waiting,
-            "area_rate":    area_rate,
-            "overall_rate": overall_rate,
-            "list":         df,
+            "p_total":        present,
+            "p_area_member":  p_area_member,
+            "p_other_member": p_other_member,
+            "p_truth":        p_truth,
+            "waiting":        waiting,
+            "area_rate":      area_rate,
+            "overall_rate":   overall_rate,
+            "list":           df,
         }
 
     def get_waiting_list(self, session_id=None):
@@ -794,19 +793,13 @@ class InsightFaceAttendance:
         conn.close()
         return rows
 
-    def get_periodical_stats(self, period_type='weekly', seminar_filter='All Sessions', default_area=None):
+    def get_periodical_stats(self, period_type='weekly', seminar_filter='All Sessions', default_area=None, start_date=None, end_date=None, custom_date=None):
         """Aggregate stats for seminars by week, month, or year."""
         import sqlite3
         import pandas as pd
         conn = sqlite3.connect(self.db_path)
         
-        total_sys_m = conn.execute("SELECT COUNT(*) FROM members WHERE type='Member'").fetchone()[0]
-        if default_area:
-            da = default_area.strip().lower()
-            area_m_total = conn.execute("SELECT COUNT(*) FROM members WHERE type='Member' AND LOWER(TRIM(area))=?", (da,)).fetchone()[0]
-        else:
-            da = None
-            area_m_total = total_sys_m
+        area_member_db_count = conn.execute("SELECT COUNT(*) FROM members WHERE type='Area Member'").fetchone()[0]
 
         if period_type == 'weekly':
             date_fmt = '%Y-W%W'
@@ -818,8 +811,17 @@ class InsightFaceAttendance:
         # Determine filter clause
         if seminar_filter == 'All Sessions':
             where_clause = ""
+        elif seminar_filter == 'Fri & Sat':
+            where_clause = "WHERE s.seminar_type IN ('Friday Seminar', 'Saturday Seminar')"
         else:
             where_clause = f"WHERE s.seminar_type = '{seminar_filter}'"
+            
+        if start_date and end_date:
+            if where_clause: where_clause += f" AND s.date BETWEEN '{start_date}' AND '{end_date}'"
+            else: where_clause = f"WHERE s.date BETWEEN '{start_date}' AND '{end_date}'"
+        elif custom_date:
+            if where_clause: where_clause += f" AND strftime('{date_fmt}', s.date) LIKE '{custom_date}%'"
+            else: where_clause = f"WHERE strftime('{date_fmt}', s.date) LIKE '{custom_date}%'"
             
         query = f"""
             SELECT 
@@ -829,9 +831,9 @@ class InsightFaceAttendance:
                 COUNT(a.id) as present,
                 SUM(CASE WHEN m.title = 'Brother' THEN 1 ELSE 0 END) as bro,
                 SUM(CASE WHEN m.title = 'Sister' THEN 1 ELSE 0 END) as sis,
-                SUM(CASE WHEN m.type = 'Member' THEN 1 ELSE 0 END) as mbr,
+                SUM(CASE WHEN m.type = 'Area Member' THEN 1 ELSE 0 END) as area_present,
+                SUM(CASE WHEN m.type = 'Other Area Member' THEN 1 ELSE 0 END) as other_mbr,
                 SUM(CASE WHEN m.type LIKE '%Truth%' THEN 1 ELSE 0 END) as ts,
-                SUM(CASE WHEN m.type = 'Member' AND LOWER(TRIM(m.area)) = ? THEN 1 ELSE 0 END) as area_present,
                 COUNT(DISTINCT s.id) as sess_count
 
             FROM sessions s
@@ -842,7 +844,7 @@ class InsightFaceAttendance:
             ORDER BY period DESC
         """
         
-        df = pd.read_sql(query, conn, params=[da])
+        df = pd.read_sql(query, conn)
         
         if not df.empty:
             # Format Period strings for readability
@@ -859,8 +861,8 @@ class InsightFaceAttendance:
             df['period'] = df['period'].apply(format_p)
 
             # Rates
-            df['overall_rate'] = (df['mbr'] / (total_sys_m * df['sess_count'].replace(0, 1)) * 100).fillna(0)
-            df['area_rate'] = (df['area_present'] / (area_m_total * df['sess_count'].replace(0, 1)) * 100).fillna(0)
+            df['overall_rate'] = (df['present'] / (area_member_db_count * df['sess_count'].replace(0, 1)) * 100).fillna(0)
+            df['area_rate'] = (df['area_present'] / (area_member_db_count * df['sess_count'].replace(0, 1)) * 100).fillna(0)
             
         conn.close()
         return df
@@ -871,13 +873,7 @@ class InsightFaceAttendance:
         import pandas as pd
         conn = sqlite3.connect(self.db_path)
         
-        total_sys_m = conn.execute("SELECT COUNT(*) FROM members WHERE type='Member'").fetchone()[0]
-        if default_area:
-            da = default_area.strip().lower()
-            area_m_total = conn.execute("SELECT COUNT(*) FROM members WHERE type='Member' AND LOWER(TRIM(area))=?", (da,)).fetchone()[0]
-        else:
-            da = None
-            area_m_total = total_sys_m
+        area_member_db_count = conn.execute("SELECT COUNT(*) FROM members WHERE type='Area Member'").fetchone()[0]
 
         # Convert Period String back to SQL friendly match
         if period_type == 'weekly':
@@ -900,6 +896,8 @@ class InsightFaceAttendance:
 
         if seminar_filter == 'All Sessions':
             where_clause = f"WHERE strftime('{date_fmt}', s.date) = ?"
+        elif seminar_filter == 'Fri & Sat':
+            where_clause = f"WHERE s.seminar_type IN ('Friday Seminar', 'Saturday Seminar') AND strftime('{date_fmt}', s.date) = ?"
         else:
             s_filter = "Other" if seminar_filter == "Other Sessions" else seminar_filter
             where_clause = f"WHERE s.seminar_type = '{s_filter}' AND strftime('{date_fmt}', s.date) = ?"
@@ -911,9 +909,9 @@ class InsightFaceAttendance:
                 COUNT(a.id) as Present,
                 SUM(CASE WHEN m.title = 'Brother' THEN 1 ELSE 0 END) as Bro,
                 SUM(CASE WHEN m.title = 'Sister' THEN 1 ELSE 0 END) as Sis,
-                SUM(CASE WHEN m.type = 'Member' THEN 1 ELSE 0 END) as Mbr,
-                SUM(CASE WHEN m.type LIKE '%Truth%' THEN 1 ELSE 0 END) as TS,
-                SUM(CASE WHEN m.type = 'Member' AND LOWER(TRIM(m.area)) = ? THEN 1 ELSE 0 END) as Area_Present
+                SUM(CASE WHEN m.type = 'Area Member' THEN 1 ELSE 0 END) as Area_Present,
+                SUM(CASE WHEN m.type = 'Other Area Member' THEN 1 ELSE 0 END) as Other_Mbr,
+                SUM(CASE WHEN m.type LIKE '%Truth%' THEN 1 ELSE 0 END) as TS
             FROM sessions s
             JOIN attendance a ON a.session_id = s.id
             LEFT JOIN members m ON a.member_code = m.member_code
@@ -922,12 +920,12 @@ class InsightFaceAttendance:
             ORDER BY s.date ASC
         """
         
-        df = pd.read_sql(query, conn, params=[da, sql_period])
+        df = pd.read_sql(query, conn, params=[sql_period])
         
         if not df.empty:
-            df['Area_Rate%'] = (df['Area_Present'] / (area_m_total if area_m_total > 0 else 1) * 100).fillna(0).round(1)
-            df['Overall_Rate%'] = (df['Mbr'] / (total_sys_m if total_sys_m > 0 else 1) * 100).fillna(0).round(1)
-            df = df.drop(columns=['Area_Present'])
+            df['Area_Rate%'] = (df['Area_Present'] / (area_member_db_count if area_member_db_count > 0 else 1) * 100).fillna(0).round(1)
+            df['Overall_Rate%'] = (df['Present'] / (area_member_db_count if area_member_db_count > 0 else 1) * 100).fillna(0).round(1)
+            # Keep Area_Present, Other_Mbr, TS for PDF generation
             
         conn.close()
         return df

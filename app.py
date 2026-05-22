@@ -1,9 +1,13 @@
 import os
 import sys
 import socket
+import ipaddress
+import shutil
+import uuid
+from tkcalendar import DateEntry
 
-# --- CONFIDENTIAL DATA FIREWALL (BLOCKS ALL NETWORK TRAFFIC) ---
-# This block ensures data privacy by preventing unauthorized connections.
+# --- CONFIDENTIAL DATA FIREWALL (BLOCKS ALL NETWORK TRAFFIC EXCEPT LOCAL LAN) ---
+# This block ensures data privacy by preventing unauthorized external connections.
 FIREWALL_BYPASS = False
 
 _orig_connect = socket.socket.connect
@@ -11,10 +15,41 @@ _orig_getaddrinfo = socket.getaddrinfo
 _orig_bind = socket.socket.bind
 _orig_sendto = socket.socket.sendto
 
+def _is_private_ip(ip_str):
+    if not ip_str:
+        return False
+    if ip_str in ('localhost', '::1'):
+        return True
+    try:
+        if '%' in ip_str:
+            ip_str = ip_str.split('%')[0]
+        ip = ipaddress.ip_address(ip_str)
+        return ip.is_loopback or ip.is_private or ip.is_link_local
+    except ValueError:
+        return False
+
+def _is_local_host_or_ip(host):
+    if not host:
+        return False
+    if host in ('localhost', '::1'):
+        return True
+    if _is_private_ip(host):
+        return True
+    try:
+        results = _orig_getaddrinfo(host, None)
+        for r in results:
+            sockaddr = r[4]
+            ip = sockaddr[0]
+            if not _is_private_ip(ip):
+                return False
+        return True
+    except Exception:
+        return False
+
 def _is_local(address):
     if isinstance(address, tuple): host = address[0]
     else: host = str(address)
-    return host in ('127.0.0.1', 'localhost', '::1')
+    return _is_local_host_or_ip(host)
 
 def secure_connect(self, address):
     if FIREWALL_BYPASS or _is_local(address): return _orig_connect(self, address)
@@ -42,6 +77,8 @@ print("[SECURITY] Confidential Data Firewall is ACTIVE.")
 
 import sqlite3
 import json
+import os
+os.environ["OPENCV_LOG_LEVEL"] = "SILENT"
 import cv2
 import customtkinter as ctk
 import pandas as pd
@@ -49,6 +86,8 @@ import threading
 import queue
 import time
 import calendar
+import uuid
+import concurrent.futures
 from PIL import Image
 from datetime import datetime, date, timedelta
 from main import InsightFaceAttendance
@@ -66,13 +105,17 @@ def _type_color(t):
     t = (t or "").lower()
     if "truth" in t: return "#17A2B8"
     if "unknown" in t: return "#DC3545"
-    return "#007BFF"
+    if "other area" in t: return "#6366F1"
+    if "area member" in t: return "#10B981"
+    return "#10B981"
 
 def _type_label(t):
     t = (t or "").lower()
     if "truth" in t: return "Truth Seeker"
     if "unknown" in t: return "?"
-    return "Member"
+    if "other area" in t: return "Other Area Member"
+    if "area member" in t: return "Area Member"
+    return "Area Member"
 
 
 # ── Widgets ────────────────────────────────────────────────────────────────────
@@ -392,7 +435,8 @@ class AutoAttendanceApp(ctk.CTk):
         self.minsize(1100, 700)
 
         self.load_settings()
-        self.backend  = InsightFaceAttendance()
+        last_cam = self.settings.get("last_camera_id", 0)
+        self.backend  = InsightFaceAttendance(camera_id=last_cam)
         self.reporter = ReportGenerator()
         
         self.after(500, self.initialize_face_engine)
@@ -577,45 +621,10 @@ class AutoAttendanceApp(ctk.CTk):
                                        font=("Arial", 13))
         self.area_label.pack(pady=(0, 8))
 
-        nav = [("🏠  Dashboard", "dashboard"), ("👥  Members", "members"),
-               ("📜  Attendance Logs", "logs"), ("📊  Reports", "reports"),
-               ("📅  Annually Report", "annually_report"),
-               ("📊  Organization chart", "org_chart"),
-               ("⚙  Settings", "settings"),
-               ("🗄  SQL Data", "sql")]
-        self.nav_buttons = {}
-        for text, key in nav:
-            btn = ctk.CTkButton(self.sidebar, text=text, font=("Arial", 13), height=44,
-                                anchor="w", fg_color="transparent", text_color="#333",
-                                hover_color="#F0F2F5",
-                                command=lambda k=key: self.show_frame(k))
-            btn.pack(pady=3, padx=12, fill="x")
-            self.nav_buttons[key] = btn
-        
-        # Camera Selection Section
-        self.cam_section = ctk.CTkFrame(self.sidebar, fg_color="transparent")
-        self.cam_section.pack(pady=15, padx=12, fill="x")
-        
-        ctk.CTkLabel(self.cam_section, text="📷 CAMERA SELECTION", font=("Arial", 10, "bold"), text_color="#9CA3AF").pack(anchor="w", padx=5, pady=(0, 5))
-        
-        self.cam_select_f = ctk.CTkFrame(self.cam_section, fg_color="transparent")
-        self.cam_select_f.pack(fill="x")
-        
-        self.cam_var = ctk.StringVar(value="Camera 0")
-        self.cam_menu = ctk.CTkComboBox(self.cam_select_f, values=["Camera 0"], variable=self.cam_var, command=self.on_camera_change, height=35)
-        self.cam_menu.pack(side="left", fill="x", expand=True, padx=(0, 5))
-        
-        self.cam_refresh_btn = ctk.CTkButton(self.cam_select_f, text="🔄", width=35, height=35, command=self.refresh_camera_list)
-        self.cam_refresh_btn.pack(side="right")
-        
-        # Initialize camera list
-        self.after(1000, self.refresh_camera_list)
-        
-        # Admin Login/Logout at bottom
+        # Bottom Login Frame (packed first so it remains fixed at the bottom)
         self.sidebar_bottom = ctk.CTkFrame(self.sidebar, fg_color="transparent")
         self.sidebar_bottom.pack(side="bottom", fill="x", pady=20)
         
-        # Firewall Status Badge
         self.fw_badge = ctk.CTkLabel(self.sidebar_bottom, text="🛡️ Firewall Active", font=("Arial", 11, "bold"),
                                      fg_color="#D1FAE5", text_color="#059669", corner_radius=6, height=28)
         self.fw_badge.pack(padx=12, pady=(0, 10), fill="x")
@@ -624,6 +633,41 @@ class AutoAttendanceApp(ctk.CTk):
                                        height=38, fg_color="#F3F4F6", text_color="#374151",
                                        hover_color="#E5E7EB", command=self.on_login_click)
         self.login_btn.pack(padx=12, fill="x")
+
+        # Scrollable Navigation Container (prevents clipping on smaller screen heights)
+        self.nav_scroll = ctk.CTkScrollableFrame(self.sidebar, fg_color="transparent")
+        self.nav_scroll.pack(fill="both", expand=True, padx=5, pady=5)
+
+        nav = [("🏠  Dashboard", "dashboard"), ("👥  Members", "members"),
+               ("📜  Attendance Logs", "logs"), ("📊  Reports", "reports"),
+               ("📅  Annually Report", "annually_report"),
+               ("📊  Organization chart", "org_chart"),
+               ("⚙  Settings", "settings"),
+               ("🗄  SQL Data", "sql")]
+        self.nav_buttons = {}
+        
+        # Pack Dashboard button
+        text, key = nav[0]
+        btn = ctk.CTkButton(self.nav_scroll, text=text, font=("Arial", 13), height=44,
+                            anchor="w", fg_color="transparent", text_color="#333",
+                            hover_color="#F0F2F5",
+                            command=lambda k=key: self.show_frame(k))
+        btn.pack(pady=3, padx=12, fill="x")
+        self.nav_buttons[key] = btn
+
+
+        
+        # Pack the rest of the navigation buttons
+        for text, key in nav[1:]:
+            btn = ctk.CTkButton(self.nav_scroll, text=text, font=("Arial", 13), height=44,
+                                anchor="w", fg_color="transparent", text_color="#333",
+                                hover_color="#F0F2F5",
+                                command=lambda k=key: self.show_frame(k))
+            btn.pack(pady=3, padx=12, fill="x")
+            self.nav_buttons[key] = btn
+            
+        # Initialize camera list
+        self.after(1000, self.refresh_camera_list)
         
         self.refresh_sidebar_visibility()
 
@@ -638,43 +682,229 @@ class AutoAttendanceApp(ctk.CTk):
                     self.nav_buttons[key].pack_forget()
 
     def refresh_camera_list(self):
-        """Detect available cameras by trying indices 0-4."""
+        """Detect available cameras by trying indices 0-4 and load WiFi cameras."""
         available = []
         current_id = getattr(self.backend, 'current_camera_id', 0)
         
+        # Add local USB/Built-in cameras
         for i in range(5):
-            # If it's the current camera, it's definitely available
             if i == current_id:
                 available.append(f"Camera {i}")
                 continue
-                
-            # Otherwise, try to open it briefly
             cap = cv2.VideoCapture(i)
             if cap.isOpened():
                 available.append(f"Camera {i}")
                 cap.release()
         
-        if not available:
+        if not available and not isinstance(current_id, str):
             available = [f"Camera {current_id}"]
         
-        # Sort by index
+        # Sort USB cameras by index
         available.sort(key=lambda x: int(x.split()[-1]))
         
+        # Add WiFi cameras from settings
+        wifi_cams = self.settings.get("wifi_cameras", [])
+        for url in wifi_cams:
+            available.append(f"WiFi Camera: {url}")
+            
+        # Ensure current camera is in list if it's a string URL
+        if isinstance(current_id, str) and current_id.startswith(("rtsp://", "http://", "https://")):
+            display_name = f"WiFi Camera: {current_id}"
+            if display_name not in available:
+                available.append(display_name)
+        
         self.cam_menu.configure(values=available)
-        if self.cam_var.get() not in available:
+        
+        # Keep dropdown in sync
+        if isinstance(current_id, str):
+            self.cam_var.set(f"WiFi Camera: {current_id}")
+        else:
             self.cam_var.set(f"Camera {current_id}")
 
     def on_camera_change(self, choice):
-        if "Camera" in choice:
-            try:
+        try:
+            if choice.startswith("WiFi Camera: "):
+                cam_id = choice.replace("WiFi Camera: ", "").strip()
+            elif choice.startswith("Camera "):
                 cam_id = int(choice.split()[-1])
-                success = self.backend.switch_camera(cam_id)
-                if not success:
-                    messagebox.showerror("Error", f"Failed to open {choice}")
-                else:
-                    print(f"[INFO] Switched to {choice}")
+            else:
+                cam_id = choice
+            
+            success = self.backend.switch_camera(cam_id)
+            if not success:
+                messagebox.showerror("Error", f"Failed to open {choice}")
+            else:
+                print(f"[INFO] Switched to {choice}")
+                self.settings["last_camera_id"] = cam_id
+                self.save_settings()
+        except Exception as e:
+            messagebox.showerror("Error", f"Camera switch failed: {e}")
+
+    def add_wifi_camera_dialog(self):
+        dialog = ctk.CTkInputDialog(
+            text="Enter WiFi/IP Camera URL (RTSP/HTTP):\nExample:\nrtsp://192.168.1.100:554/live\nhttp://192.168.1.100:8080/video", 
+            title="Add WiFi Camera"
+        )
+        url = dialog.get_input()
+        if not url:
+            return
+        url = url.strip()
+        if not url:
+            return
+            
+        print(f"[INFO] Testing connection to WiFi Camera: {url}")
+        
+        # Create a brief visual feedback or directly test (with timeout or quickly)
+        cap = cv2.VideoCapture(url)
+        if not cap.isOpened():
+            messagebox.showerror("Connection Failed", "Could not connect to the WiFi Camera URL.\nPlease check the URL and make sure the camera is connected to the same network.")
+            cap.release()
+            return
+        cap.release()
+        
+        # Save to settings
+        wifi_cams = self.settings.get("wifi_cameras", [])
+        if url not in wifi_cams:
+            wifi_cams.append(url)
+            self.settings["wifi_cameras"] = wifi_cams
+            self.save_settings()
+            
+        self.refresh_camera_list()
+        
+        # Select and switch to the new camera
+        display_name = f"WiFi Camera: {url}"
+        self.cam_var.set(display_name)
+        self.on_camera_change(display_name)
+
+    def start_auto_search(self):
+        popup = ctk.CTkToplevel(self)
+        popup.title("WiFi Camera Scanner")
+        popup.geometry("400x180")
+        popup.resizable(False, False)
+        popup.transient(self)
+        popup.attributes("-topmost", True)
+        
+        popup.update_idletasks()
+        w = popup.winfo_width()
+        h = popup.winfo_height()
+        x = self.winfo_x() + (self.winfo_width() // 2) - (w // 2)
+        y = self.winfo_y() + (self.winfo_height() // 2) - (h // 2)
+        popup.geometry(f"+{x}+{y}")
+        popup.grab_set()
+        
+        lbl = ctk.CTkLabel(popup, text="🔍 Scanning network for WiFi cameras...", font=("Arial", 13, "bold"))
+        lbl.pack(pady=(25, 10))
+        
+        progress = ctk.CTkProgressBar(popup, width=300)
+        progress.pack(pady=10)
+        progress.start()
+        
+        status_lbl = ctk.CTkLabel(popup, text="Sending discovery probes (ONVIF/SSDP)...", font=("Arial", 11), text_color="#6B7280")
+        status_lbl.pack(pady=(0, 15))
+        
+        def run_scan():
+            try:
+                ips = discover_cameras()
+                if not ips:
+                    popup.after(0, lambda: finish_scan([]))
+                    return
+                    
+                popup.after(0, lambda: status_lbl.configure(text=f"Found {len(ips)} IP addresses. Testing streams..."))
+                
+                candidates = []
+                for ip in ips:
+                    for p in COMMON_PATHS:
+                        if p.startswith(":8080"):
+                            candidates.append(f"http://{ip}{p}")
+                        else:
+                            candidates.append(f"rtsp://{ip}:554{p}")
+                            candidates.append(f"rtsp://{ip}{p}")
+                            
+                working = []
+                with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
+                    res_map = executor.map(test_camera_url, candidates)
+                    for r in res_map:
+                        if r:
+                            working.append(r)
+                            
+                popup.after(0, lambda: finish_scan(working))
             except Exception as e:
-                messagebox.showerror("Error", f"Camera switch failed: {e}")
+                popup.after(0, lambda e_err=e: messagebox.showerror("Scan Error", str(e_err)))
+                popup.after(0, popup.destroy)
+                
+        def finish_scan(working_urls):
+            progress.stop()
+            popup.destroy()
+            if not working_urls:
+                messagebox.showinfo("Scan Complete", "No WiFi/IP cameras with active video streams were found on your local network.\n\nMake sure the camera is powered on and connected to the same network.")
+                return
+                
+            show_scan_results_dialog(working_urls)
+            
+        def show_scan_results_dialog(urls):
+            res_dialog = ctk.CTkToplevel(self)
+            res_dialog.title("Discovered WiFi Cameras")
+            res_dialog.geometry("450x220")
+            res_dialog.resizable(False, False)
+            res_dialog.transient(self)
+            res_dialog.attributes("-topmost", True)
+            
+            res_dialog.update_idletasks()
+            rw = res_dialog.winfo_width()
+            rh = res_dialog.winfo_height()
+            rx = self.winfo_x() + (self.winfo_width() // 2) - (rw // 2)
+            ry = self.winfo_y() + (self.winfo_height() // 2) - (rh // 2)
+            res_dialog.geometry(f"+{rx}+{ry}")
+            res_dialog.grab_set()
+            
+            ctk.CTkLabel(res_dialog, text="🎉 Discovered WiFi Cameras!", font=("Arial", 14, "bold")).pack(pady=(15, 10))
+            ctk.CTkLabel(res_dialog, text="Select a camera stream to add to your list:", font=("Arial", 12), text_color="#4B5563").pack(pady=(0, 10))
+            
+            selected_url = ctk.StringVar(value=urls[0])
+            combo = ctk.CTkComboBox(res_dialog, values=urls, variable=selected_url, width=380, height=35)
+            combo.pack(pady=10)
+            
+            btn_f = ctk.CTkFrame(res_dialog, fg_color="transparent")
+            btn_f.pack(fill="x", pady=(15, 0), padx=20)
+            
+            def add_selected():
+                url = selected_url.get().strip()
+                if url:
+                    wifi_cams = self.settings.get("wifi_cameras", [])
+                    if url not in wifi_cams:
+                        wifi_cams.append(url)
+                        self.settings["wifi_cameras"] = wifi_cams
+                        self.save_settings()
+                    self.refresh_camera_list()
+                    display_name = f"WiFi Camera: {url}"
+                    self.cam_var.set(display_name)
+                    self.on_camera_change(display_name)
+                    res_dialog.destroy()
+                    messagebox.showinfo("Success", f"Connected to: {url}")
+            
+            ctk.CTkButton(btn_f, text="Cancel", width=100, fg_color="#F3F4F6", text_color="#374151", hover_color="#E5E7EB", command=res_dialog.destroy).pack(side="left", padx=10)
+            ctk.CTkButton(btn_f, text="Connect & Add", width=140, fg_color="#007BFF", hover_color="#0069D9", text_color="white", command=add_selected).pack(side="right", padx=10)
+            
+        threading.Thread(target=run_scan, daemon=True).start()
+
+    def delete_wifi_camera(self):
+        choice = self.cam_var.get()
+        if not choice.startswith("WiFi Camera: "):
+            messagebox.showwarning("Invalid Selection", "Please select a WiFi Camera from the dropdown first to remove it.")
+            return
+            
+        url = choice.replace("WiFi Camera: ", "").strip()
+        wifi_cams = self.settings.get("wifi_cameras", [])
+        if url in wifi_cams:
+            if messagebox.askyesno("Confirm Removal", f"Remove this WiFi Camera URL from settings?\n\n{url}"):
+                wifi_cams.remove(url)
+                self.settings["wifi_cameras"] = wifi_cams
+                self.save_settings()
+                
+                # Switch back to Camera 0
+                self.cam_var.set("Camera 0")
+                self.on_camera_change("Camera 0")
+                self.refresh_camera_list()
         
         # Update login button text
         if self.is_admin:
@@ -860,20 +1090,35 @@ class AutoAttendanceApp(ctk.CTk):
         stats_row.grid(row=0, column=0, sticky="ew", pady=(0, 8))
 
         cards_cfg = [("Present Today",       "0",  "#28A745"),
-                     ("Members Present",      "0",  "#007BFF"),
-                     ("Truth Seekers",        "0",  "#17A2B8"),
-                     ("Waiting Recognition",   "0",  "#DC3545"),
-                     ("Area Rate %",           "0%", "#6F42C1"),
-                     ("Overall Rate %",        "0%", "#FFC107")]
+                     ("Area Member",         "0",  "#007BFF"),
+                     ("Other Area Member",   "0",  "#6610f2"),
+                     ("Truth Seeker",        "0",  "#17A2B8"),
+                     ("Waiting Recognition", "0",  "#DC3545"),
+                     ("Area Rate %",         "0%", "#6F42C1"),
+                     ("Overall Rate %",      "0%", "#FFC107")]
         self.cards = {}
         for i, (title, val, color) in enumerate(cards_cfg):
             stats_row.grid_columnconfigure(i, weight=1)
             card = ctk.CTkFrame(stats_row, fg_color="#FFFFFF", corner_radius=10)
             card.grid(row=0, column=i, padx=4, sticky="nsew")
-            ctk.CTkLabel(card, text=title, font=("Arial", 9), text_color="gray").pack(pady=(10, 0))
-            lbl = ctk.CTkLabel(card, text=val, font=("Arial", 20, "bold"), text_color=color)
-            lbl.pack(pady=(0, 10))
-            self.cards[title] = lbl
+            
+            lbl_title = ctk.CTkLabel(card, text=title, font=("Arial", 9), text_color="gray")
+            lbl_title.pack(pady=(10, 0))
+            
+            lbl_val = ctk.CTkLabel(card, text=val, font=("Arial", 20, "bold"), text_color=color)
+            lbl_val.pack(pady=(0, 10))
+            self.cards[title] = lbl_val
+
+            if title == "Area Rate %":
+                desc = "Area Rate % = (Total Area Members Present / Total Area Members in DB) * 100"
+                Tooltip(card, desc)
+                Tooltip(lbl_title, desc)
+                Tooltip(lbl_val, desc)
+            elif title == "Overall Rate %":
+                desc = "Overall Rate % = (Total Present Today / Total Area Members in DB) * 100"
+                Tooltip(card, desc)
+                Tooltip(lbl_title, desc)
+                Tooltip(lbl_val, desc)
 
         # Body: camera | side panel
         body = ctk.CTkFrame(f, fg_color="transparent")
@@ -886,10 +1131,54 @@ class AutoAttendanceApp(ctk.CTk):
         cam_panel = ctk.CTkFrame(body, fg_color="#FFFFFF", corner_radius=10)
         cam_panel.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
 
-        self.cam_label = ctk.CTkLabel(cam_panel, text="📷  Camera Offline",
+        top_cam_f = ctk.CTkFrame(cam_panel, fg_color="transparent")
+        top_cam_f.pack(padx=15, pady=(15, 5), fill="x")
+
+        self.cam_label = ctk.CTkLabel(top_cam_f, text="📷  Camera Offline",
                                        width=600, height=380, fg_color="#1a1a2e",
                                        text_color="white", font=("Arial", 15))
-        self.cam_label.pack(padx=15, pady=(15, 5))
+        self.cam_label.pack(side="left")
+
+        # Camera Selection Section (moved from sidebar)
+        self.cam_section = ctk.CTkFrame(top_cam_f, fg_color="#F8F9FA", corner_radius=8)
+        self.cam_section.pack(side="left", padx=(15, 0), fill="both", expand=True)
+
+        cam_inner = ctk.CTkFrame(self.cam_section, fg_color="transparent")
+        cam_inner.pack(padx=15, pady=20, fill="both", expand=True)
+        
+        ctk.CTkLabel(cam_inner, text="📷 CAMERA SELECTION", font=("Arial", 11, "bold"), text_color="#9CA3AF").pack(anchor="w", pady=(0, 10))
+        
+        self.cam_select_f = ctk.CTkFrame(cam_inner, fg_color="transparent")
+        self.cam_select_f.pack(fill="x")
+        
+        last_cam = self.settings.get("last_camera_id", 0)
+        if isinstance(last_cam, str):
+            init_val = f"WiFi Camera: {last_cam}"
+        else:
+            init_val = f"Camera {last_cam}"
+
+        self.cam_var = ctk.StringVar(value=init_val)
+        self.cam_menu = ctk.CTkComboBox(self.cam_select_f, values=[init_val], variable=self.cam_var, command=self.on_camera_change, height=35)
+        
+        self.cam_refresh_btn = ctk.CTkButton(self.cam_select_f, text="🔄", font=("Arial", 16), width=40, height=35, command=self.refresh_camera_list)
+        self.cam_refresh_btn.pack(side="right")
+        Tooltip(self.cam_refresh_btn, "Refresh to search active camera")
+        
+        self.cam_menu.pack(side="left", fill="x", expand=True, padx=(0, 5))
+        
+        self.search_wifi_cam_btn = ctk.CTkButton(cam_inner, text="🔍 Auto Search WiFi 📷", font=("Arial", 11, "bold"), height=30, fg_color="#3B82F6", text_color="white", hover_color="#2563EB", command=self.start_auto_search)
+        self.search_wifi_cam_btn.pack(fill="x", pady=(10, 0))
+
+        self.cam_btns_f = ctk.CTkFrame(cam_inner, fg_color="transparent")
+        self.cam_btns_f.pack(fill="x", pady=(10, 0))
+        
+        self.add_wifi_cam_btn = ctk.CTkButton(self.cam_btns_f, text="➕ Add URL", font=("Arial", 11), height=28, fg_color="#E5E7EB", text_color="#374151", hover_color="#D1D5DB", command=self.add_wifi_camera_dialog)
+        
+        self.del_wifi_cam_btn = ctk.CTkButton(self.cam_btns_f, text="❌", font=("Arial", 11), width=40, height=28, fg_color="#EF4444", text_color="white", hover_color="#DC2626", command=self.delete_wifi_camera)
+        self.del_wifi_cam_btn.pack(side="right")
+        Tooltip(self.del_wifi_cam_btn, "Remove WiFi Camera")
+        
+        self.add_wifi_cam_btn.pack(side="left", fill="x", expand=True, padx=(0, 5))
 
         ctrl = ctk.CTkFrame(cam_panel, fg_color="transparent")
         ctrl.pack(pady=6)
@@ -997,9 +1286,8 @@ class AutoAttendanceApp(ctk.CTk):
         stat_configs = [
             ("Total DB Count", "#3B82F6"),
             ("Area Member", "#10B981"),
-            ("Area Truth Seeker", "#14B8A6"),
             ("Other Area Member", "#6366F1"),
-            ("Other Area Truth Seeker", "#8B5CF6")
+            ("Truth Seeker", "#14B8A6")
         ]
         
         for i, (title, color) in enumerate(stat_configs):
@@ -1032,7 +1320,7 @@ class AutoAttendanceApp(ctk.CTk):
         s_t_f = ctk.CTkFrame(filter_f, fg_color="transparent")
         s_t_f.pack(side="left", padx=10)
         ctk.CTkLabel(s_t_f, text="TYPE", font=("Arial", 10, "bold"), text_color="#9CA3AF").pack(anchor="w")
-        self.member_type_filter = ctk.CTkComboBox(s_t_f, values=["All", "Member", "Truth Seeker"], width=130, command=lambda _: self.refresh_member_table())
+        self.member_type_filter = ctk.CTkComboBox(s_t_f, values=["All", "Area Member", "Other Area Member", "Truth Seeker"], width=130, command=lambda _: self.refresh_member_table())
         self.member_type_filter.pack()
 
         # Area Filter
@@ -1126,19 +1414,17 @@ class AutoAttendanceApp(ctk.CTk):
         
         # Ensure area and type are strings and handle NULLs
         df['area'] = df['area'].fillna("").astype(str).str.lower().str.strip()
-        df['type'] = df['type'].fillna("Member").astype(str)
+        df['type'] = df['type'].fillna("Area Member").astype(str)
         
         t_total = len(df)
-        t_area_m  = len(df[(df['area'] == curr_area) & (df['type'] == 'Member')])
-        t_area_gf = len(df[(df['area'] == curr_area) & (df['type'] == 'Truth Seeker')])
-        t_oth_m   = len(df[(df['area'] != curr_area) & (df['type'] == 'Member')])
-        t_oth_gf  = len(df[(df['area'] != curr_area) & (df['type'] == 'Truth Seeker')])
+        t_area_m  = len(df[df['type'].str.lower() == 'area member'])
+        t_oth_m   = len(df[df['type'].str.lower() == 'other area member'])
+        t_ts      = len(df[df['type'].str.lower() == 'truth seeker'])
         
         self.member_stats_labels["Total DB Count"].configure(text=str(t_total))
         self.member_stats_labels["Area Member"].configure(text=str(t_area_m))
-        self.member_stats_labels["Area Truth Seeker"].configure(text=str(t_area_gf))
         self.member_stats_labels["Other Area Member"].configure(text=str(t_oth_m))
-        self.member_stats_labels["Other Area Truth Seeker"].configure(text=str(t_oth_gf))
+        self.member_stats_labels["Truth Seeker"].configure(text=str(t_ts))
         # -----------------------------
 
         if df.empty:
@@ -1382,19 +1668,20 @@ class AutoAttendanceApp(ctk.CTk):
         th.pack(fill="x", padx=10, pady=(10, 0))
         th.grid_columnconfigure(0, minsize=40)
         th.grid_columnconfigure(1, weight=3)
-        th.grid_columnconfigure(2, minsize=60)
-        th.grid_columnconfigure(3, minsize=60)
-        th.grid_columnconfigure(4, minsize=60)
-        th.grid_columnconfigure(5, minsize=80)
-        th.grid_columnconfigure(6, minsize=80)
-        th.grid_columnconfigure(7, minsize=80)
-        th.grid_columnconfigure(8, minsize=140)
+        th.grid_columnconfigure(2, minsize=50)
+        th.grid_columnconfigure(3, minsize=50)
+        th.grid_columnconfigure(4, minsize=50)
+        th.grid_columnconfigure(5, minsize=70)
+        th.grid_columnconfigure(6, minsize=70)
+        th.grid_columnconfigure(7, minsize=70)
+        th.grid_columnconfigure(8, minsize=70)
+        th.grid_columnconfigure(9, minsize=140)
 
         self.select_all_var = tk.BooleanVar(value=False)
         self.select_all_cb = ctk.CTkCheckBox(th, text="", variable=self.select_all_var, width=20, command=self.toggle_select_all)
         self.select_all_cb.grid(row=0, column=0, padx=(10, 0))
 
-        headers = [("SESSION TITLE / DATE", 1), ("TOTAL", 2), ("MEMBER", 3), ("TRUTH SEEKER", 4), ("AREA %", 5), ("OVERALL %", 6), ("SPEC. %", 7), ("ACTIONS", 8)]
+        headers = [("SESSION TITLE / DATE", 1), ("TOTAL", 2), ("AREA M.", 3), ("OTHER M.", 4), ("T. SEEKER", 5), ("AREA %", 6), ("OVERALL %", 7), ("SPEC. %", 8), ("ACTIONS", 9)]
         for name, col in headers:
             ctk.CTkLabel(th, text=name, font=("Arial", 11, "bold"), text_color="#9CA3AF").grid(row=0, column=col, sticky="w", padx=10)
 
@@ -1442,155 +1729,135 @@ class AutoAttendanceApp(ctk.CTk):
     def refresh_sessions_summary(self):
         for w in self.sessions_frame.winfo_children():
             w.destroy()
-        
         self.session_checkboxes = {}
-        
-        # Use Multi-Search Filters
+
+        # --- Show loading indicator immediately so the page feels instant ---
+        loading_lbl = ctk.CTkLabel(self.sessions_frame, text="⏳  Loading sessions...",
+                                   font=("Arial", 13), text_color="#6B7280")
+        loading_lbl.pack(pady=30)
+
+        # Capture filter values NOW (on UI thread) before handing off
         q_name = self.report_search.get().strip().lower()
-        q_from = self.report_from.get().strip() # DD-MM-YYYY
-        q_to   = self.report_to.get().strip()   # DD-MM-YYYY
-        
-        # Convert search dates to SQL-friendly format YYYY-MM-DD
+        q_from = self.report_from.get().strip()
+        q_to   = self.report_to.get().strip()
+
         def to_sql_date(d_str):
             if not d_str: return None
             try:
                 parts = d_str.split("-")
                 return f"{parts[2]}-{parts[1]}-{parts[0]}"
             except: return None
-        
+
         sql_from = to_sql_date(q_from)
         sql_to   = to_sql_date(q_to)
 
-        conn = sqlite3.connect("database/attendance.db")
-        total_m = conn.execute("SELECT COUNT(*) FROM members").fetchone()[0]
-        
-        query = "SELECT id, title, date FROM sessions s WHERE EXISTS (SELECT 1 FROM attendance a WHERE a.session_id = s.id)"
-        params = []
-        
-        if q_name:
-            query += " AND (LOWER(title) LIKE ? OR id LIKE ?)"
-            params.append(f"%{q_name}%")
-            params.append(f"%{q_name}%")
-        
-        if sql_from:
-            query += " AND date >= ?"
-            params.append(sql_from)
-        
-        if sql_to:
-            query += " AND date <= ?"
-            params.append(sql_to)
-            
-        query += " ORDER BY date DESC, start_time DESC"
-        
-        sessions = conn.execute(query, params).fetchall()
-        conn.close()
+        # ── Background thread: DB fetch only ─────────────────────────────────
+        def fetch_data():
+            try:
+                conn = sqlite3.connect("database/attendance.db", check_same_thread=False)
 
-        if not sessions:
-            ctk.CTkLabel(self.sessions_frame, text="No sessions yet.", font=("Arial", 13), text_color="gray").pack(pady=20)
-            return
+                query = '''
+                    SELECT
+                        s.id, s.title, s.date, s.target_count,
+                        COUNT(a.id) as total_p,
+                        SUM(CASE WHEN LOWER(a.status) = 'area member'       THEN 1 ELSE 0 END) as area_p,
+                        SUM(CASE WHEN LOWER(a.status) = 'other area member' THEN 1 ELSE 0 END) as other_p,
+                        SUM(CASE WHEN a.status LIKE '%truth%'               THEN 1 ELSE 0 END) as gosp_p,
+                        SUM(CASE WHEN a.status = 'unknown'                  THEN 1 ELSE 0 END) as wait_p,
+                        SUM(CASE WHEN LOWER(a.status) = 'area member'       THEN 1 ELSE 0 END) as area_present
+                    FROM sessions s
+                    LEFT JOIN attendance a ON a.session_id = s.id
+                    WHERE EXISTS (SELECT 1 FROM attendance a2 WHERE a2.session_id = s.id)
+                '''
+                params = []
+                if q_name:
+                    query += " AND (LOWER(s.title) LIKE ? OR s.id LIKE ?)"
+                    params += [f"%{q_name}%", f"%{q_name}%"]
+                if sql_from:
+                    query += " AND s.date >= ?"
+                    params.append(sql_from)
+                if sql_to:
+                    query += " AND s.date <= ?"
+                    params.append(sql_to)
+                query += " GROUP BY s.id, s.title, s.date, s.target_count"
+                query += " ORDER BY s.date DESC, s.start_time DESC LIMIT 150"
 
-        for sid, title, dt in sessions:
-            row = ctk.CTkFrame(self.sessions_frame, fg_color="transparent", height=75)
-            row.pack(fill="x", pady=0)
-            row.grid_columnconfigure(0, minsize=40); row.grid_columnconfigure(1, weight=3)
-            row.grid_columnconfigure(2, minsize=60); row.grid_columnconfigure(3, minsize=60)
-            row.grid_columnconfigure(4, minsize=60); row.grid_columnconfigure(5, minsize=80)
-            row.grid_columnconfigure(6, minsize=80); row.grid_columnconfigure(7, minsize=80)
-            row.grid_columnconfigure(8, minsize=140)
+                sessions   = conn.execute(query, params).fetchall()
+                area_total = conn.execute("SELECT COUNT(*) FROM members WHERE type='Area Member'").fetchone()[0] or 0
+                conn.close()
 
-            # Checkbox
-            cb_var = tk.BooleanVar(value=False); self.session_checkboxes[sid] = cb_var
-            ctk.CTkCheckBox(row, text="", variable=cb_var, width=20).grid(row=0, column=0, padx=(10, 0))
-            
-            # Basic Header Info
-            det_f = ctk.CTkFrame(row, fg_color="transparent")
-            det_f.grid(row=0, column=1, sticky="w", padx=10, pady=10)
-            ctk.CTkLabel(det_f, text=str(title), font=("Arial", 14, "bold"), text_color="#1F2937").pack(anchor="w")
-            ctk.CTkLabel(det_f, text=str(dt or "No Date"), font=("Arial", 11), text_color="#6B7280").pack(anchor="w")
+                # Hand results back to UI thread via queue
+                self.gui_queue.put(lambda s=sessions, a=area_total: render_sessions(s, a))
+            except Exception as e:
+                print(f"[REPORT] DB fetch error: {e}")
 
-            # Placeholder labels for stats
-            tot_lbl = ctk.CTkLabel(row, text="...", font=("Arial", 12), text_color="gray")
-            tot_lbl.grid(row=0, column=2, sticky="w", padx=10)
-            
-            mem_lbl = ctk.CTkLabel(row, text="...", font=("Arial", 12), text_color="gray")
-            mem_lbl.grid(row=0, column=3, sticky="w", padx=10)
-            
-            gosp_lbl = ctk.CTkLabel(row, text="...", font=("Arial", 12), text_color="gray")
-            gosp_lbl.grid(row=0, column=4, sticky="w", padx=10)
+        # ── UI rendering: runs on main thread after fetch completes ──────────
+        def render_sessions(sessions, area_total):
+            # Remove loading label (safe – still on main thread)
+            try:
+                loading_lbl.destroy()
+            except Exception:
+                pass
 
-            area_lbl = ctk.CTkLabel(row, text="...", font=("Arial", 12), text_color="gray")
-            area_lbl.grid(row=0, column=5, sticky="w", padx=10)
+            if not sessions:
+                ctk.CTkLabel(self.sessions_frame, text="No sessions yet.",
+                             font=("Arial", 13), text_color="gray").pack(pady=20)
+                return
 
-            over_lbl = ctk.CTkLabel(row, text="...", font=("Arial", 12), text_color="gray")
-            over_lbl.grid(row=0, column=6, sticky="w", padx=10)
+            def add_batch(index=0):
+                if index >= len(sessions):
+                    return
+                chunk = sessions[index:index + 8]   # 8 rows per batch
+                for sid, title, dt, target_count, total_p, area_p, other_p, gosp_p, wait_p, area_present in chunk:
+                    row = ctk.CTkFrame(self.sessions_frame, fg_color="transparent", height=75)
+                    row.pack(fill="x", pady=0)
+                    row.grid_columnconfigure(0, minsize=40); row.grid_columnconfigure(1, weight=3)
+                    row.grid_columnconfigure(2, minsize=60); row.grid_columnconfigure(3, minsize=60)
+                    row.grid_columnconfigure(4, minsize=60); row.grid_columnconfigure(5, minsize=80)
+                    row.grid_columnconfigure(6, minsize=80); row.grid_columnconfigure(7, minsize=80)
+                    row.grid_columnconfigure(8, minsize=140)
 
-            spec_lbl = ctk.CTkLabel(row, text="...", font=("Arial", 12), text_color="gray")
-            spec_lbl.grid(row=0, column=7, sticky="w", padx=10)
+                    cb_var = tk.BooleanVar(value=False)
+                    self.session_checkboxes[sid] = cb_var
+                    ctk.CTkCheckBox(row, text="", variable=cb_var, width=20).grid(row=0, column=0, padx=(10, 0))
 
-            # Actions are always ready (More compact)
-            act_f = ctk.CTkFrame(row, fg_color="transparent"); act_f.grid(row=0, column=8, sticky="e", padx=5)
-            ctk.CTkButton(act_f, text="✎ Details", width=55, height=28, fg_color="transparent", text_color="#8B5CF6", hover_color="#EDE9FE", font=("Arial", 10, "bold"), command=lambda s=sid: self.show_session_details_popup(s)).pack(side="left", padx=1)
-            ctk.CTkButton(act_f, text="📗 Exc", width=40, height=28, fg_color="transparent", text_color="#10B981", hover_color="#D1FAE5", font=("Arial", 10, "bold"), command=lambda s=sid: self._run_export("excel", session_id=s)).pack(side="left", padx=1)
-            ctk.CTkButton(act_f, text="📕 PDF", width=40, height=28, fg_color="transparent", text_color="#EF4444", hover_color="#FEE2E2", font=("Arial", 10, "bold"), command=lambda s=sid: self._run_export("pdf", session_id=s)).pack(side="left", padx=1)
+                    det_f = ctk.CTkFrame(row, fg_color="transparent")
+                    det_f.grid(row=0, column=1, sticky="w", padx=10, pady=10)
+                    ctk.CTkLabel(det_f, text=str(title), font=("Arial", 14, "bold"), text_color="#1F2937").pack(anchor="w")
+                    ctk.CTkLabel(det_f, text=str(dt or "No Date"), font=("Arial", 11), text_color="#6B7280").pack(anchor="w")
 
-            ctk.CTkFrame(self.sessions_frame, height=1, fg_color="#F3F4F6").pack(fill="x", padx=10)
+                    tp  = total_p    or 0
+                    ap  = area_p     or 0
+                    op  = other_p    or 0
+                    gp  = gosp_p     or 0
+                    apr = area_present or 0
+                    tc  = target_count or 0
 
-            # Start a background thread for this session's stats
-            def load_stats(sid=sid, t_lbl=tot_lbl, m_lbl=mem_lbl, g_lbl=gosp_lbl, a_lbl=area_lbl, o_lbl=over_lbl, s_lbl=spec_lbl):
-                try:
-                    c = sqlite3.connect("database/attendance.db")
-                    
-                    # 1. Session-specific Target
-                    sess_res = c.execute("SELECT target_count FROM sessions WHERE id=?", (sid,)).fetchone()
-                    target = sess_res[0] or 0
-                    
-                    # 2. Attendance Counts
-                    att_res = c.execute("""
-                        SELECT COUNT(a.id),
-                               SUM(CASE WHEN LOWER(a.status) = 'member' THEN 1 ELSE 0 END),
-                               SUM(CASE WHEN a.status LIKE '%truth%' THEN 1 ELSE 0 END),
-                               SUM(CASE WHEN a.status = 'unknown' THEN 1 ELSE 0 END)
-                        FROM attendance a WHERE a.session_id=?
-                    """, (sid,)).fetchone()
-                    total_p, member_p, gosp_p, wait_p = (att_res[0] or 0), (att_res[1] or 0), (att_res[2] or 0), (att_res[3] or 0)
-                    
-                    # 3. System totals for Rate calculations
-                    total_sys_m = c.execute("SELECT COUNT(*) FROM members").fetchone()[0]
-                    def_area = self.settings.get("default_area", "").strip().lower()
-                    
-                    area_total = total_sys_m
-                    area_present = member_p
-                    
-                    if def_area:
-                        area_total = c.execute("SELECT COUNT(*) FROM members WHERE LOWER(TRIM(area))=?", (def_area,)).fetchone()[0]
-                        area_present = c.execute("""
-                            SELECT COUNT(*) FROM attendance a 
-                            JOIN members m ON a.member_code = m.member_code
-                            WHERE a.session_id=? AND LOWER(a.status)='member' AND LOWER(TRIM(m.area))=?
-                        """, (sid, def_area)).fetchone()[0]
-                    
-                    c.close()
-                    
-                    area_rate = (area_present / area_total * 100) if area_total > 0 else 0
-                    overall_rate = (total_p / total_sys_m * 100) if total_sys_m > 0 else 0
-                    spec_rate = (total_p / target * 100) if target > 0 else 0
-                    
-                    # Update UI via the Post Office (Queue) to avoid thread errors
-                    def safe_update():
-                        try:
-                            if t_lbl.winfo_exists(): t_lbl.configure(text=f"{total_p}", font=("Arial", 12, "bold"), text_color="#4B5563")
-                            if m_lbl.winfo_exists(): m_lbl.configure(text=f"{member_p}", font=("Arial", 12, "bold"), text_color="#4B5563")
-                            if g_lbl.winfo_exists(): g_lbl.configure(text=f"{gosp_p}", font=("Arial", 12, "bold"), text_color="#17A2B8")
-                            if a_lbl.winfo_exists(): a_lbl.configure(text=f"{area_rate:.1f}%", font=("Arial", 12, "bold"), text_color="#6F42C1")
-                            if o_lbl.winfo_exists(): o_lbl.configure(text=f"{overall_rate:.1f}%", font=("Arial", 12, "bold"), text_color="#FFC107")
-                            if s_lbl.winfo_exists(): s_lbl.configure(text=f"{spec_rate:.1f}%", font=("Arial", 12, "bold"), text_color="#E11D48")
-                        except: pass
-                    
-                    self.gui_queue.put(safe_update)
-                except Exception as e:
-                    print(f"Error loading stats for session {sid}: {e}")
+                    area_rate    = (apr / area_total * 100) if area_total > 0 else 0
+                    overall_rate = (tp  / area_total * 100) if area_total > 0 else 0
+                    spec_rate    = (tp  / tc         * 100) if tc > 0 else 0
 
-            threading.Thread(target=load_stats, daemon=True).start()
+                    ctk.CTkLabel(row, text=f"{tp}",              font=("Arial", 12, "bold"), text_color="#4B5563").grid(row=0, column=2, sticky="w", padx=10)
+                    ctk.CTkLabel(row, text=f"{ap}",              font=("Arial", 12, "bold"), text_color="#4B5563").grid(row=0, column=3, sticky="w", padx=10)
+                    ctk.CTkLabel(row, text=f"{op}",              font=("Arial", 12, "bold"), text_color="#4B5563").grid(row=0, column=4, sticky="w", padx=10)
+                    ctk.CTkLabel(row, text=f"{gp}",              font=("Arial", 12, "bold"), text_color="#17A2B8").grid(row=0, column=5, sticky="w", padx=10)
+                    ctk.CTkLabel(row, text=f"{area_rate:.1f}%",  font=("Arial", 12, "bold"), text_color="#6F42C1").grid(row=0, column=6, sticky="w", padx=10)
+                    ctk.CTkLabel(row, text=f"{overall_rate:.1f}%",font=("Arial", 12, "bold"), text_color="#FFC107").grid(row=0, column=7, sticky="w", padx=10)
+                    ctk.CTkLabel(row, text=f"{spec_rate:.1f}%",  font=("Arial", 12, "bold"), text_color="#E11D48").grid(row=0, column=8, sticky="w", padx=10)
+
+                    act_f = ctk.CTkFrame(row, fg_color="transparent")
+                    act_f.grid(row=0, column=9, sticky="e", padx=5)
+                    ctk.CTkButton(act_f, text="✎ Details", width=55, height=28, fg_color="transparent", text_color="#8B5CF6", hover_color="#EDE9FE", font=("Arial", 10, "bold"), command=lambda s=sid: self.show_session_details_popup(s)).pack(side="left", padx=1)
+                    ctk.CTkButton(act_f, text="📗 Exc",    width=40, height=28, fg_color="transparent", text_color="#10B981", hover_color="#D1FAE5", font=("Arial", 10, "bold"), command=lambda s=sid: self._run_export("excel", session_id=s)).pack(side="left", padx=1)
+                    ctk.CTkButton(act_f, text="📕 PDF",    width=40, height=28, fg_color="transparent", text_color="#EF4444", hover_color="#FEE2E2", font=("Arial", 10, "bold"), command=lambda s=sid: self._run_export("pdf",   session_id=s)).pack(side="left", padx=1)
+
+                    ctk.CTkFrame(self.sessions_frame, height=1, fg_color="#F3F4F6").pack(fill="x", padx=10)
+
+                self.after(1, lambda: add_batch(index + 8))
+
+            add_batch()
+
+        threading.Thread(target=fetch_data, daemon=True).start()
 
     def show_session_details_popup(self, session_id):
         conn = sqlite3.connect("database/attendance.db")
@@ -1602,11 +1869,8 @@ class AutoAttendanceApp(ctk.CTk):
         
         # Calculate session-specific stats
         total_sys_m = conn.execute("SELECT COUNT(*) FROM members").fetchone()[0]
-        def_area = self.settings.get("default_area", "").strip().lower()
-        if def_area:
-            area_total = conn.execute("SELECT COUNT(*) FROM members WHERE LOWER(TRIM(area))=?", (def_area,)).fetchone()[0]
-        else:
-            area_total = total_sys_m
+        # Denominator: Total 'Area Member' DB count
+        area_total = conn.execute("SELECT COUNT(*) FROM members WHERE type='Area Member'").fetchone()[0]
 
         attendees = conn.execute("""
             SELECT a.id, COALESCE(m.name, a.person_name), a.status, a.check_in_time, a.record_image,
@@ -1619,18 +1883,16 @@ class AutoAttendanceApp(ctk.CTk):
         conn.close()
 
         # Grouping
-        members_list = [a for a in attendees if a[2].lower() == 'member']
+        area_list = [a for a in attendees if a[2].lower() == 'area member']
+        other_list = [a for a in attendees if a[2].lower() == 'other area member']
         gospel_list = [a for a in attendees if 'truth' in a[2].lower()]
         unknown_list = [a for a in attendees if a[2].lower() == 'unknown']
         
-        p_total = len(members_list) + len(gospel_list)
-        if def_area:
-            area_present = len([a for a in attendees if a[7] and a[7].strip().lower() == def_area])
-        else:
-            area_present = p_total
+        p_total = len(area_list) + len(other_list) + len(gospel_list)
+        area_present = len(area_list)
             
         area_rate = (area_present / area_total * 100) if area_total > 0 else 0
-        overall_rate = (p_total / total_sys_m * 100) if total_sys_m > 0 else 0
+        overall_rate = (p_total / area_total * 100) if area_total > 0 else 0
         special_rate = (p_total / target_val * 100) if (target_val and target_val > 0) else 0
 
         popup = ctk.CTkToplevel(self)
@@ -1686,8 +1948,9 @@ class AutoAttendanceApp(ctk.CTk):
         
         stats = [
             ("PRESENT TODAY", str(p_total), "#28A745"),
-            ("MEMBERS", str(len(members_list)), "#007BFF"),
-            ("TRUTH SEEKERS", str(len(gospel_list)), "#17A2B8"),
+            ("AREA MEMBER", str(len(area_list)), "#007BFF"),
+            ("OTHER AREA MEMBER", str(len(other_list)), "#6610f2"),
+            ("TRUTH SEEKER", str(len(gospel_list)), "#17A2B8"),
             ("AREA RATE%", f"{area_rate:.1f}%", "#6F42C1"),
             ("OVERALL RATE%", f"{overall_rate:.1f}%", "#FFC107"),
             ("SPECIAL RATE%", f"{special_rate:.1f}%", "#E11D48")
@@ -1739,8 +2002,9 @@ class AutoAttendanceApp(ctk.CTk):
                 else:
                     ctk.CTkLabel(row, text=status.capitalize(), font=("Arial", 10, "bold"), text_color="#007BFF", fg_color="#EBF5FF", corner_radius=10, width=80, height=26).pack(side="right", padx=15)
 
-        render_section("Members Present", members_list)
-        render_section("Truth Seekers Guest", gospel_list)
+        render_section("Area Member Present", area_list)
+        render_section("Other Area Member Present", other_list)
+        render_section("Truth Seeker Present", gospel_list)
         render_section("Unidentified Individuals (Waiting Identification)", unknown_list)
 
         # Footer Export
@@ -1918,7 +2182,7 @@ class AutoAttendanceApp(ctk.CTk):
         type_frame.pack(fill="x", padx=30, pady=(0, 10))
         
         self.report_type_var = ctk.StringVar(value="All Sessions")
-        type_sel = ctk.CTkSegmentedButton(type_frame, values=["Friday Seminar", "Saturday Seminar", "Other Sessions", "All Sessions"], 
+        type_sel = ctk.CTkSegmentedButton(type_frame, values=["Friday Seminar", "Saturday Seminar", "Fri & Sat", "Other Sessions", "All Sessions"], 
                                          variable=self.report_type_var, height=40, font=("Arial", 13, "bold"),
                                          command=lambda _: self.refresh_annually_report())
         type_sel.pack(side="left", fill="x", expand=True)
@@ -1932,7 +2196,7 @@ class AutoAttendanceApp(ctk.CTk):
         ctk.CTkButton(btn_frame, text="📄 PDF", width=100, fg_color="#DC3545", hover_color="#C82333",
                       command=lambda: self.export_annually_report("pdf")).pack(side="left", padx=5)
 
-        # Sub Level: Period Selection
+        # Sub Level: Period Selection & Search
         period_frame = ctk.CTkFrame(f, fg_color="transparent")
         period_frame.pack(fill="x", padx=30, pady=(0, 20))
         
@@ -1940,14 +2204,39 @@ class AutoAttendanceApp(ctk.CTk):
         period_sel = ctk.CTkSegmentedButton(period_frame, values=["Weekly", "Monthly", "Yearly"], 
                                            variable=self.report_period_var, height=35,
                                            command=lambda _: self.refresh_annually_report())
-        period_sel.pack(anchor="center")
+        period_sel.pack(side="left")
+
+        # Date Search UI
+        search_f = ctk.CTkFrame(period_frame, fg_color="transparent")
+        search_f.pack(side="right")
+        
+        ctk.CTkLabel(search_f, text="From:", font=("Arial", 12, "bold")).pack(side="left", padx=5)
+        self.report_date_start = DateEntry(search_f, width=12, background='darkblue', foreground='white', borderwidth=2, date_pattern='yyyy-mm-dd',
+                                           weekendbackground='white', weekendforeground='black')
+        self.report_date_start.pack(side="left", padx=5)
+        
+        ctk.CTkLabel(search_f, text="To:", font=("Arial", 12, "bold")).pack(side="left", padx=5)
+        self.report_date_end = DateEntry(search_f, width=12, background='darkblue', foreground='white', borderwidth=2, date_pattern='yyyy-mm-dd',
+                                         weekendbackground='white', weekendforeground='black')
+        self.report_date_end.pack(side="left", padx=5)
+        
+        ctk.CTkButton(search_f, text="Search", width=60, command=self.refresh_annually_report).pack(side="left", padx=5)
+        ctk.CTkButton(search_f, text="Clear", width=60, fg_color="#6B7280", hover_color="#4B5563", 
+                      command=self.clear_report_date_search).pack(side="left", padx=5)
 
         # Content Area
         self.annually_table_container = ctk.CTkFrame(f, fg_color="transparent")
         self.annually_table_container.pack(fill="both", expand=True, padx=30)
         
         # Initial load
-        self.after(500, self.refresh_annually_report)
+        self.clear_report_date_search() # clear will init the proper dates and refresh
+
+    def clear_report_date_search(self):
+        # Set to wide range by default or empty? If tkcalendar, empty is hard, so set to current year start/end
+        today = date.today()
+        self.report_date_start.set_date(date(today.year, 1, 1))
+        self.report_date_end.set_date(date(today.year, 12, 31))
+        self.refresh_annually_report()
 
     def refresh_annually_report(self):
         for w in self.annually_table_container.winfo_children(): w.destroy()
@@ -1955,20 +2244,22 @@ class AutoAttendanceApp(ctk.CTk):
         p_type = self.report_period_var.get().lower()
         s_type = self.report_type_var.get()
         if s_type == "Other Sessions": s_type = "Other"
+        start_date = self.report_date_start.get_date().strftime("%Y-%m-%d")
+        end_date = self.report_date_end.get_date().strftime("%Y-%m-%d")
         
         def_area = self.settings.get("default_area", "").strip()
-        df = self.backend.get_periodical_stats(p_type, seminar_filter=s_type, default_area=def_area)
+        df = self.backend.get_periodical_stats(p_type, seminar_filter=s_type, default_area=def_area, start_date=start_date, end_date=end_date)
         
         # Table Header
         table_f = ctk.CTkScrollableFrame(self.annually_table_container, fg_color="#FFFFFF", corner_radius=10, border_width=1, border_color="#E5E7EB")
         table_f.pack(fill="both", expand=True)
         
-        headers = ["PERIOD", "PRESENT COUNT", "BROTHER / SISTER", "MEMBER / TRUTH SEEKER", "AREA RATE %", "OVERALL RATE %", "DOWNLOAD"]
+        headers = ["PERIOD", "PRESENT", "BRO / SIS", "AREA / OTHER / T.SEEKER", "AREA RATE %", "OVERALL RATE %", "DOWNLOAD"]
         h_f = ctk.CTkFrame(table_f, fg_color="#F9FAFB", height=45)
         h_f.pack(fill="x", pady=(0, 5))
+        relx_map = [0.03, 0.15, 0.26, 0.40, 0.60, 0.72, 0.84]
         for i, h in enumerate(headers):
-            relx = 0.05 if i == 0 else (0.16 + (i-1) * 0.14)
-            ctk.CTkLabel(h_f, text=h, font=("Arial", 10, "bold"), text_color="#4B5563").place(relx=relx, rely=0.5, anchor="w")
+            ctk.CTkLabel(h_f, text=h, font=("Arial", 10, "bold"), text_color="#4B5563").place(relx=relx_map[i], rely=0.5, anchor="w")
         
         if df.empty:
             ctk.CTkLabel(table_f, text="No records found for the selected filters.", font=("Arial", 13), pady=40).pack()
@@ -1985,16 +2276,18 @@ class AutoAttendanceApp(ctk.CTk):
             r_f = ctk.CTkFrame(table_f, fg_color="transparent", height=45)
             r_f.pack(fill="x")
             
-            ctk.CTkLabel(r_f, text=p_val, font=("Arial", 12, "bold"), text_color="#111827").place(relx=0.05, rely=0.5, anchor="w")
-            ctk.CTkLabel(r_f, text=str(int(row['present'])), font=("Arial", 12)).place(relx=0.16, rely=0.5, anchor="w")
-            ctk.CTkLabel(r_f, text=f"{int(row['bro'])} / {int(row['sis'])}", font=("Arial", 12)).place(relx=0.30, rely=0.5, anchor="w")
-            ctk.CTkLabel(r_f, text=f"{int(row['mbr'])} / {int(row['ts'])}", font=("Arial", 12)).place(relx=0.44, rely=0.5, anchor="w")
-            ctk.CTkLabel(r_f, text=f"{row['area_rate']:.1f}%", font=("Arial", 12, "bold"), text_color="#2563EB").place(relx=0.58, rely=0.5, anchor="w")
+            ctk.CTkLabel(r_f, text=p_val, font=("Arial", 12, "bold"), text_color="#111827").place(relx=0.03, rely=0.5, anchor="w")
+            ctk.CTkLabel(r_f, text=str(int(row['present'])), font=("Arial", 12)).place(relx=0.15, rely=0.5, anchor="w")
+            bs_txt = f"{int(row['bro'])} / {int(row['sis'])}"
+            ctk.CTkLabel(r_f, text=bs_txt, font=("Arial", 12)).place(relx=0.26, rely=0.5, anchor="w")
+            aot_txt = f"{int(row.get('area_present',0))} / {int(row.get('other_mbr',0))} / {int(row.get('ts',0))}"
+            ctk.CTkLabel(r_f, text=aot_txt, font=("Arial", 12)).place(relx=0.40, rely=0.5, anchor="w")
+            ctk.CTkLabel(r_f, text=f"{row['area_rate']:.1f}%", font=("Arial", 12, "bold"), text_color="#2563EB").place(relx=0.60, rely=0.5, anchor="w")
             ctk.CTkLabel(r_f, text=f"{row['overall_rate']:.1f}%", font=("Arial", 12, "bold"), text_color=color).place(relx=0.72, rely=0.5, anchor="w")
             
             # Action Buttons
             act_f = ctk.CTkFrame(r_f, fg_color="transparent")
-            act_f.place(relx=0.86, rely=0.5, anchor="w")
+            act_f.place(relx=0.84, rely=0.5, anchor="w")
             
             ctk.CTkButton(act_f, text="📊", width=30, height=28, fg_color="#28A745", hover_color="#218838",
                           command=lambda p=p_val: self.export_individual_period(p, "excel")).pack(side="left", padx=2)
@@ -2011,16 +2304,17 @@ class AutoAttendanceApp(ctk.CTk):
             a_pres = df['present'].mean()
             a_bro = df['bro'].mean()
             a_sis = df['sis'].mean()
-            a_mbr = df['mbr'].mean()
-            a_ts = df['ts'].mean()
+            a_area_p = df['area_present'].mean() if 'area_present' in df else 0
+            a_other = df['other_mbr'].mean() if 'other_mbr' in df else 0
+            a_ts = df['ts'].mean() if 'ts' in df else 0
             a_area = df['area_rate'].mean()
             a_over = df['overall_rate'].mean()
             
-            ctk.CTkLabel(avg_f, text="AVERAGE:", font=("Arial", 12, "bold")).place(relx=0.05, rely=0.5, anchor="w")
-            ctk.CTkLabel(avg_f, text=f"{a_pres:.1f}", font=("Arial", 12, "bold")).place(relx=0.16, rely=0.5, anchor="w")
-            ctk.CTkLabel(avg_f, text=f"{a_bro:.1f} / {a_sis:.1f}", font=("Arial", 11)).place(relx=0.30, rely=0.5, anchor="w")
-            ctk.CTkLabel(avg_f, text=f"{a_mbr:.1f} / {a_ts:.1f}", font=("Arial", 11)).place(relx=0.44, rely=0.5, anchor="w")
-            ctk.CTkLabel(avg_f, text=f"{a_area:.1f}%", font=("Arial", 12, "bold"), text_color="#2563EB").place(relx=0.58, rely=0.5, anchor="w")
+            ctk.CTkLabel(avg_f, text="AVERAGE:", font=("Arial", 12, "bold")).place(relx=0.03, rely=0.5, anchor="w")
+            ctk.CTkLabel(avg_f, text=f"{a_pres:.1f}", font=("Arial", 12, "bold")).place(relx=0.15, rely=0.5, anchor="w")
+            ctk.CTkLabel(avg_f, text=f"{a_bro:.1f} / {a_sis:.1f}", font=("Arial", 11)).place(relx=0.26, rely=0.5, anchor="w")
+            ctk.CTkLabel(avg_f, text=f"{a_area_p:.1f} / {a_other:.1f} / {a_ts:.1f}", font=("Arial", 11)).place(relx=0.40, rely=0.5, anchor="w")
+            ctk.CTkLabel(avg_f, text=f"{a_area:.1f}%", font=("Arial", 12, "bold"), text_color="#2563EB").place(relx=0.60, rely=0.5, anchor="w")
             ctk.CTkLabel(avg_f, text=f"{a_over:.1f}%", font=("Arial", 12, "bold"), text_color=color).place(relx=0.72, rely=0.5, anchor="w")
 
     def export_individual_period(self, period_str, kind):
@@ -2046,15 +2340,17 @@ class AutoAttendanceApp(ctk.CTk):
             p_type = self.report_period_var.get().lower()
             s_type = self.report_type_var.get()
             if s_type == "Other Sessions": s_type = "Other"
+            start_date = self.report_date_start.get_date().strftime("%Y-%m-%d")
+            end_date = self.report_date_end.get_date().strftime("%Y-%m-%d")
             
             def_area = self.settings.get("default_area", "")
             from report import ReportGenerator
             rg = ReportGenerator()
             
             if kind == "excel":
-                path = rg.generate_periodical_excel(p_type, s_type, def_area)
+                path = rg.generate_periodical_excel(p_type, s_type, def_area, start_date=start_date, end_date=end_date)
             else:
-                path = rg.generate_periodical_pdf(p_type, s_type, def_area)
+                path = rg.generate_periodical_pdf(p_type, s_type, def_area, start_date=start_date, end_date=end_date)
                 
             if path:
                 messagebox.showinfo("Export Successful", f"Report saved to:\n{os.path.abspath(path)}")
@@ -2867,8 +3163,9 @@ class AutoAttendanceApp(ctk.CTk):
         self.last_waiting_count = waiting_count
 
         self.cards["Present Today"].configure(text=str(s["p_total"]))
-        self.cards["Members Present"].configure(text=str(s["p_members"]))
-        self.cards["Truth Seekers"].configure(text=str(s["p_truth"]))
+        self.cards["Area Member"].configure(text=str(s["p_area_member"]))
+        self.cards["Other Area Member"].configure(text=str(s["p_other_member"]))
+        self.cards["Truth Seeker"].configure(text=str(s["p_truth"]))
         self.cards["Waiting Recognition"].configure(text=str(s["waiting"]))
         self.cards["Area Rate %"].configure(text=f"{s['area_rate']:.1f}%")
         self.cards["Overall Rate %"].configure(text=f"{s['overall_rate']:.1f}%")
@@ -3247,8 +3544,8 @@ class AutoAttendanceApp(ctk.CTk):
         right_f = ctk.CTkFrame(card, fg_color="transparent")
         right_f.pack(side="right", padx=15)
 
-        badge_colors = {"member": "#007BFF", "truth seeker": "#17A2B8", "unknown": "#DC3545"}
-        b_color = badge_colors.get(m_type.lower(), "#6C757D")
+        badge_colors = {"area member": "#10B981", "other area member": "#6366F1", "truth seeker": "#17A2B8", "unknown": "#DC3545"}
+        b_color = badge_colors.get(m_type.lower(), "#10B981")
         ctk.CTkLabel(right_f, text=m_type.upper(), font=("Arial", 8, "bold"), fg_color=b_color, text_color="white", corner_radius=4, width=80).pack(pady=(8, 2))
         
         now_t = datetime.now().strftime("%I:%M %p")
@@ -3431,9 +3728,9 @@ class AutoAttendanceApp(ctk.CTk):
         title_cb = ctk.CTkComboBox(form, variable=title_var, values=["", "Brother", "Sister"], width=360)
         title_cb.pack(pady=3, fill="x")
 
-        ctk.CTkLabel(form, text="Type (Member / Truth Seeker)", font=("Arial", 11, "bold")).pack(anchor="w", pady=(8, 0))
-        type_var = ctk.StringVar(value="Member")
-        type_cb = ctk.CTkComboBox(form, variable=type_var, values=["Member", "Truth Seeker"], width=360)
+        ctk.CTkLabel(form, text="Type (Area Member / Other Area Member / Truth Seeker)", font=("Arial", 11, "bold")).pack(anchor="w", pady=(8, 0))
+        type_var = ctk.StringVar(value="Area Member")
+        type_cb = ctk.CTkComboBox(form, variable=type_var, values=["Area Member", "Other Area Member", "Truth Seeker"], width=360)
         type_cb.pack(pady=3, fill="x")
 
         ctk.CTkLabel(form, text="Area", font=("Arial", 11, "bold")).pack(anchor="w", pady=(8, 0))
@@ -3515,7 +3812,7 @@ class AutoAttendanceApp(ctk.CTk):
                     # Update member title/details if needed
                     self.backend.register_member({"name": name, "title": title_cb.get(), "type": m_type}, force_code=code)
                     # Promote attendance row
-                    self.backend.identify_unknown(att_id, name, code, m_type.lower())
+                    self.backend.identify_unknown(att_id, name, code, m_type)
                 except Exception as e:
                     messagebox.showerror("Save Error", f"Could not update member record: {str(e)}", parent=popup)
                     return
@@ -3556,7 +3853,7 @@ class AutoAttendanceApp(ctk.CTk):
                 }
                 prefix = self.settings.get("member_prefix", "")
                 code = self.backend.register_member(data, prefix=prefix)
-                self.backend.identify_unknown(att_id, name, code, m_type.lower())
+                self.backend.identify_unknown(att_id, name, code, m_type)
 
             self.refresh_stats()
             self.refresh_logs_table()
@@ -3793,9 +4090,9 @@ class AutoAttendanceApp(ctk.CTk):
 
         # ── Type dropdown ─────────────────────────────────────────────────────
         ctk.CTkLabel(scroll, text="Type", font=("Arial", 12, "bold")).pack(anchor="w", pady=(10, 0))
-        type_var = ctk.StringVar(value=existing.get("type", "Member") or "Member")
+        type_var = ctk.StringVar(value=existing.get("type", "Area Member") or "Area Member")
         type_cb  = ctk.CTkComboBox(scroll, variable=type_var,
-                                    values=["Member", "Truth Seeker"],
+                                    values=["Area Member", "Other Area Member", "Truth Seeker"],
                                     width=400, state="disabled" if readonly else "normal")
         type_cb.pack(pady=4)
 
@@ -3917,6 +4214,92 @@ class AutoAttendanceApp(ctk.CTk):
                           width=200, height=42, command=save).pack(pady=22)
         else:
             ctk.CTkButton(scroll, text="Close", width=140, command=dialog.destroy).pack(pady=22)
+
+
+# ── WiFi Camera Network Discovery Helpers ───────────────────────────────────
+
+COMMON_PATHS = [
+    "", 
+    "/live",
+    "/h264Preview_01_main",
+    "/onvif-media1",
+    "/stream1",
+    "/1",
+    "/h264",
+    "/ch1",
+    "/cam/realmonitor?channel=1&subtype=0",
+    ":8080/video",
+    ":8080/videofeed"
+]
+
+def discover_cameras():
+    ips = set()
+    probe_uuid = uuid.uuid4()
+    ws_discovery_soap = f"""<?xml version="1.0" encoding="utf-8"?>
+<Envelope xmlns:tds="http://www.onvif.org/ver10/device/wsdl" xmlns="http://www.w3.org/2003/05/soap-envelope" xmlns:wsa="http://schemas.xmlsoap.org/ws/2004/08/addressing">
+  <Header>
+    <wsa:MessageID>urn:uuid:{probe_uuid}</wsa:MessageID>
+    <wsa:To>urn:schemas-xmlsoap-org:ws:2004:08:addressing</wsa:To>
+    <wsa:Action>http://schemas.xmlsoap.org/ws/2005/04/discovery/Probe</wsa:Action>
+  </Header>
+  <Body>
+    <Probe xmlns="http://schemas.xmlsoap.org/ws/2005/04/discovery">
+      <Types>tds:Device</Types>
+    </Probe>
+  </Body>
+</Envelope>"""
+
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+    s.settimeout(1.5)
+    s.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 4)
+    try:
+        s.sendto(ws_discovery_soap.encode('utf-8'), ('239.255.255.250', 3702))
+        while True:
+            try:
+                data, addr = s.recvfrom(65535)
+                ips.add(addr[0])
+            except socket.timeout:
+                break
+    except Exception:
+        pass
+    finally:
+        s.close()
+
+    ssdp_request = (
+        "M-SEARCH * HTTP/1.1\r\n"
+        "HOST: 239.255.255.250:1900\r\n"
+        "MAN: \"ssdp:discover\"\r\n"
+        "MX: 2\r\n"
+        "ST: ssdp:all\r\n"
+        "\r\n"
+    )
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+    s.settimeout(1.5)
+    s.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 4)
+    try:
+        s.sendto(ssdp_request.encode('utf-8'), ('239.255.255.250', 1900))
+        while True:
+            try:
+                data, addr = s.recvfrom(65535)
+                data_str = data.decode('utf-8', errors='ignore').lower()
+                if any(k in data_str for k in ('camera', 'cam', 'video', 'rtsp', 'onvif', 'ipc')):
+                    ips.add(addr[0])
+            except socket.timeout:
+                break
+    except Exception:
+        pass
+    finally:
+        s.close()
+        
+    return list(ips)
+
+def test_camera_url(url):
+    import cv2
+    cap = cv2.VideoCapture(url)
+    if cap.isOpened():
+        cap.release()
+        return url
+    return None
 
 
 if __name__ == "__main__":

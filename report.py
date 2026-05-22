@@ -31,12 +31,7 @@ class ReportGenerator:
         
         # System totals
         total_sys_m = conn.execute("SELECT COUNT(*) FROM members").fetchone()[0]
-        da = default_area.strip().lower() if default_area and default_area.strip() else None
-        
-        if da:
-            area_total = conn.execute("SELECT COUNT(*) FROM members WHERE LOWER(TRIM(area))=?", (da,)).fetchone()[0]
-        else:
-            area_total = total_sys_m
+        area_total = conn.execute("SELECT COUNT(*) FROM members WHERE type='Area Member'").fetchone()[0]
 
         # Attendees
         df = pd.read_sql("""
@@ -47,21 +42,17 @@ class ReportGenerator:
         """, conn, params=[session_id])
         conn.close()
 
-        p_members = len(df[df['status'].str.lower() == 'member'])
+        p_area_member = len(df[df['status'].str.lower() == 'area member'])
+        p_other_member = len(df[df['status'].str.lower() == 'other area member'])
         p_truth   = len(df[df['status'].str.lower().str.contains('truth', na=False)])
-        p_total   = p_members + p_truth
+        p_total   = p_area_member + p_other_member + p_truth
         waiting   = len(df[df['status'].str.lower() == 'unknown']) if not df.empty else 0
 
-        # Area rate
-        area_present = 0
-        if da and not df.empty:
-            area_present = len(df[(df['status'].str.lower() == 'member') & 
-                                 (df['area'].fillna('').str.strip().str.lower() == da)])
-        elif not da:
-            area_present = p_members
+        # Area present is attendees with status 'area member'
+        area_present = p_area_member
         
         area_rate    = (area_present / area_total * 100) if area_total > 0 else 0
-        overall_rate = (p_total / total_sys_m * 100) if total_sys_m > 0 else 0
+        overall_rate = (p_total / area_total * 100) if area_total > 0 else 0
 
         return {
             "Session Title": title,
@@ -70,8 +61,9 @@ class ReportGenerator:
             "Duration": f"{duration} mins" if duration else "N/A",
             "Target Total": target or 0,
             "Total Present": p_total,
-            "Members": p_members,
-            "Truth Seekers": p_truth,
+            "Area Member": p_area_member,
+            "Other Area Member": p_other_member,
+            "Truth Seeker": p_truth,
             "Waiting Recognition": waiting,
             "Area Rate %": f"{area_rate:.1f}%",
             "Overall Rate %": f"{overall_rate:.1f}%",
@@ -93,8 +85,9 @@ class ReportGenerator:
                     "Session Title": r["Session Title"],
                     "Date": r["Date"],
                     "Total Present": r["Total Present"],
-                    "Members": r["Members"],
-                    "Truth Seekers": r["Truth Seekers"],
+                    "Area Member": r["Area Member"],
+                    "Other Area Member": r["Other Area Member"],
+                    "Truth Seeker": r["Truth Seeker"],
                     "Waiting Recognition": r["Waiting Recognition"],
                     "Area Rate %": r["Area Rate %"],
                     "Overall Rate %": r["Overall Rate %"]
@@ -190,8 +183,8 @@ class ReportGenerator:
             # Table header
             pdf.set_fill_color(220, 230, 241)
             pdf.set_font("Arial", 'B', 9)
-            cols = ["Session Title", "Date", "Total", "Member", "Truth Seeker", "Area %", "Overall %"]
-            w = [55, 25, 18, 18, 20, 27, 27]
+            cols = ["Session Title", "Date", "Total", "Area M", "Other M", "Truth Seeker", "Area %", "Overall %"]
+            w = [45, 23, 12, 16, 16, 25, 25, 28]
             for i, c in enumerate(cols):
                 pdf.cell(w[i], 10, c, 1, 0, 'C', True)
             pdf.ln()
@@ -201,10 +194,11 @@ class ReportGenerator:
                 pdf.cell(w[0], 9, str(r["Session Title"])[:30], 1)
                 pdf.cell(w[1], 9, str(r["Date"]), 1, 0, 'C')
                 pdf.cell(w[2], 9, str(r["Total Present"]), 1, 0, 'C')
-                pdf.cell(w[3], 9, str(r["Members"]), 1, 0, 'C')
-                pdf.cell(w[4], 9, str(r["Truth Seekers"]), 1, 0, 'C')
-                pdf.cell(w[5], 9, str(r["Area Rate %"]), 1, 0, 'C')
-                pdf.cell(w[6], 9, str(r["Overall Rate %"]), 1, 0, 'C')
+                pdf.cell(w[3], 9, str(r["Area Member"]), 1, 0, 'C')
+                pdf.cell(w[4], 9, str(r["Other Area Member"]), 1, 0, 'C')
+                pdf.cell(w[5], 9, str(r["Truth Seeker"]), 1, 0, 'C')
+                pdf.cell(w[6], 9, str(r["Area Rate %"]), 1, 0, 'C')
+                pdf.cell(w[7], 9, str(r["Overall Rate %"]), 1, 0, 'C')
                 pdf.ln()
 
             filename = out_path if out_path else f"reports/Batch_Report_{date.today()}.pdf"
@@ -269,8 +263,9 @@ class ReportGenerator:
             pdf.cell(30, 8, f"=  {val}", ln=True)
 
         right_cell("Total Present", stats["Total Present"])
-        right_cell("Member Present", stats["Members"])
-        right_cell("Truth Seeker Present", stats["Truth Seekers"])
+        right_cell("Area Member Present", stats["Area Member"])
+        right_cell("Other Member Present", stats["Other Area Member"])
+        right_cell("Truth Seeker Present", stats["Truth Seeker"])
         
         # Member Rate = Area Present / Area Total
         a_p, a_t = stats["Area Present"], stats["Area Total"]
@@ -638,19 +633,13 @@ class ReportGenerator:
             return os.path.join("reports", filename)
         return os.path.join(downloads_path, filename)
 
-    def generate_periodical_excel(self, period_type='weekly', seminar_filter='All Sessions', default_area=None, custom_date=None):
+    def generate_periodical_excel(self, period_type='weekly', seminar_filter='All Sessions', default_area=None, start_date=None, end_date=None, custom_date=None):
         """Generates an Excel report for seminars grouped by week, month, or year."""
         import pandas as pd
         import sqlite3
         conn = sqlite3.connect(self.db_path)
         
-        total_sys_m = conn.execute("SELECT COUNT(*) FROM members WHERE type='Member'").fetchone()[0]
-        if default_area:
-            da = default_area.strip().lower()
-            area_m_total = conn.execute("SELECT COUNT(*) FROM members WHERE type='Member' AND LOWER(TRIM(area))=?", (da,)).fetchone()[0]
-        else:
-            da = None
-            area_m_total = total_sys_m
+        area_member_db_count = conn.execute("SELECT COUNT(*) FROM members WHERE type='Area Member'").fetchone()[0]
 
         if period_type == 'weekly':
             date_fmt = '%Y-W%W'
@@ -661,13 +650,18 @@ class ReportGenerator:
             
         if seminar_filter == 'All Sessions':
             where_clause = ""
+        elif seminar_filter == 'Fri & Sat':
+            where_clause = "WHERE s.seminar_type IN ('Friday Seminar', 'Saturday Seminar')"
         else:
             s_filter = "Other" if seminar_filter == "Other Sessions" else seminar_filter
             where_clause = f"WHERE s.seminar_type = '{s_filter}'"
             
-        if custom_date:
-            if where_clause: where_clause += f" AND strftime('{date_fmt}', s.date) = '{custom_date}'"
-            else: where_clause = f"WHERE strftime('{date_fmt}', s.date) = '{custom_date}'"
+        if start_date and end_date:
+            if where_clause: where_clause += f" AND s.date BETWEEN '{start_date}' AND '{end_date}'"
+            else: where_clause = f"WHERE s.date BETWEEN '{start_date}' AND '{end_date}'"
+        elif custom_date:
+            if where_clause: where_clause += f" AND strftime('{date_fmt}', s.date) LIKE '{custom_date}%'"
+            else: where_clause = f"WHERE strftime('{date_fmt}', s.date) LIKE '{custom_date}%'"
 
         query = f"""
             SELECT 
@@ -675,9 +669,9 @@ class ReportGenerator:
                 COUNT(a.id) as Present,
                 SUM(CASE WHEN m.title = 'Brother' THEN 1 ELSE 0 END) as Bro,
                 SUM(CASE WHEN m.title = 'Sister' THEN 1 ELSE 0 END) as Sis,
-                SUM(CASE WHEN m.type = 'Member' THEN 1 ELSE 0 END) as Mbr,
+                SUM(CASE WHEN m.type = 'Area Member' THEN 1 ELSE 0 END) as Area_Present,
+                SUM(CASE WHEN m.type = 'Other Area Member' THEN 1 ELSE 0 END) as Other_Mbr,
                 SUM(CASE WHEN m.type LIKE '%Truth%' THEN 1 ELSE 0 END) as TS,
-                SUM(CASE WHEN m.type = 'Member' AND LOWER(TRIM(m.area)) = ? THEN 1 ELSE 0 END) as Area_Present,
                 COUNT(DISTINCT s.id) as Sess_Count
             FROM sessions s
             JOIN attendance a ON a.session_id = s.id
@@ -687,7 +681,7 @@ class ReportGenerator:
             ORDER BY Period DESC
         """
         
-        df = pd.read_sql(query, conn, params=[da])
+        df = pd.read_sql(query, conn)
         conn.close()
 
         if df.empty: return None
@@ -705,8 +699,9 @@ class ReportGenerator:
             except: return p
         df['Period'] = df['Period'].apply(format_p)
 
-        df['Area_Rate%'] = (df['Area_Present'] / (area_m_total * df['Sess_Count'].replace(0, 1)) * 100).fillna(0).round(1)
-        df['Overall_Rate%'] = (df['Mbr'] / (total_sys_m * df['Sess_Count'].replace(0, 1)) * 100).fillna(0).round(1)
+
+        df['Area_Rate%'] = (df['Area_Present'] / (area_member_db_count * df['Sess_Count'].replace(0, 1)) * 100).fillna(0).round(1)
+        df['Overall_Rate%'] = (df['Present'] / (area_member_db_count * df['Sess_Count'].replace(0, 1)) * 100).fillna(0).round(1)
 
         # Add Average Row
         if not df.empty:
@@ -724,10 +719,10 @@ class ReportGenerator:
         df.to_excel(p, index=False)
         return p
 
-    def generate_periodical_pdf(self, period_type='weekly', seminar_filter='All Sessions', default_area=None):
+    def generate_periodical_pdf(self, period_type='weekly', seminar_filter='All Sessions', default_area=None, start_date=None, end_date=None, custom_date=None):
         """Generates a professional PDF report for seminars grouped by week, month, or year."""
         import pandas as pd
-        df_path = self.generate_periodical_excel(period_type, seminar_filter, default_area)
+        df_path = self.generate_periodical_excel(period_type, seminar_filter, default_area, start_date=start_date, end_date=end_date, custom_date=custom_date)
         if not df_path: return None
         
         df = pd.read_excel(df_path)
@@ -749,8 +744,8 @@ class ReportGenerator:
         # Header Table
         pdf.set_fill_color(240, 240, 240)
         pdf.set_font("Arial", 'B', 10)
-        cols = ["Period", "Present", "Bro/Sis", "Mbr/TS", "Area Rate", "Overall Rate"]
-        widths = [60, 35, 45, 45, 40, 40]
+        cols = ["Period", "Present", "Bro/Sis", "Area/Other", "T. Seeker", "Area %", "Overall %"]
+        widths = [55, 25, 35, 45, 30, 35, 35]
         for i, c in enumerate(cols):
             pdf.cell(widths[i], 12, c, border=1, fill=True, align='C')
         pdf.ln()
@@ -775,11 +770,14 @@ class ReportGenerator:
             bs = f"{row['Bro']:.1f} / {row['Sis']:.1f}" if is_avg else f"{int(row['Bro'])} / {int(row['Sis'])}"
             pdf.cell(widths[2], 10, bs, border=1, fill=fill, align='C')
             
-            mt = f"{row['Mbr']:.1f} / {row['TS']:.1f}" if is_avg else f"{int(row['Mbr'])} / {int(row['TS'])}"
-            pdf.cell(widths[3], 10, mt, border=1, fill=fill, align='C')
+            ao = f"{row['Area_Present']:.1f} / {row['Other_Mbr']:.1f}" if is_avg else f"{int(row['Area_Present'])} / {int(row['Other_Mbr'])}"
+            pdf.cell(widths[3], 10, ao, border=1, fill=fill, align='C')
             
-            pdf.cell(widths[4], 10, f"{row['Area_Rate%']:.1f}%", border=1, fill=fill, align='C')
-            pdf.cell(widths[5], 10, f"{row['Overall_Rate%']:.1f}%", border=1, fill=fill, align='C')
+            ts_val = f"{row['TS']:.1f}" if is_avg else str(int(row['TS']))
+            pdf.cell(widths[4], 10, ts_val, border=1, fill=fill, align='C')
+            
+            pdf.cell(widths[5], 10, f"{row['Area_Rate%']:.1f}%", border=1, fill=fill, align='C')
+            pdf.cell(widths[6], 10, f"{row['Overall_Rate%']:.1f}%", border=1, fill=fill, align='C')
             pdf.ln()
 
         out_path = df_path.replace(".xlsx", ".pdf")
@@ -827,8 +825,8 @@ class ReportGenerator:
             pdf.cell(0, 8, f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", ln=True, align='C')
             pdf.ln(10)
 
-            cols = ["Date", "Type", "Present", "Bro/Sis", "Mbr/TS", "Area %", "Overall %"]
-            widths = [45, 55, 30, 45, 45, 30, 30]
+            cols = ["Date", "Type", "Present", "Bro/Sis", "Area/Other/TS", "Area %", "Overall %"]
+            widths = [35, 50, 25, 35, 55, 30, 30]
             
             pdf.set_fill_color(240, 240, 240)
             pdf.set_font("Arial", 'B', 10)
@@ -853,11 +851,14 @@ class ReportGenerator:
                 pres = f"{row['Present']:.1f}" if is_avg else str(int(row['Present']))
                 pdf.cell(widths[2], 10, pres, border=1, fill=fill, align='C')
                 
-                bs = f"{row['Bro']:.1f} / {row['Sis']:.1f}" if is_avg else f"{int(row['Bro'])} / {int(row['Sis'])}"
+                bs = f"{row['Bro']:.1f}/{row['Sis']:.1f}" if is_avg else f"{int(row['Bro'])}/{int(row['Sis'])}"
                 pdf.cell(widths[3], 10, bs, border=1, fill=fill, align='C')
                 
-                mt = f"{row['Mbr']:.1f} / {row['TS']:.1f}" if is_avg else f"{int(row['Mbr'])} / {int(row['TS'])}"
-                pdf.cell(widths[4], 10, mt, border=1, fill=fill, align='C')
+                a_p = row.get('Area_Present', 0)
+                o_m = row.get('Other_Mbr', 0)
+                ts  = row.get('TS', 0)
+                aot = f"{a_p:.1f}/{o_m:.1f}/{ts:.1f}" if is_avg else f"{int(a_p)}/{int(o_m)}/{int(ts)}"
+                pdf.cell(widths[4], 10, aot, border=1, fill=fill, align='C')
                 
                 pdf.cell(widths[5], 10, f"{row['Area_Rate%']:.1f}%", border=1, fill=fill, align='C')
                 pdf.cell(widths[6], 10, f"{row['Overall_Rate%']:.1f}%", border=1, fill=fill, align='C')
