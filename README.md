@@ -61,47 +61,21 @@ run.bat
 ### Step 1: Install Python
 When installing Python from the official website
 
-### Step 2: Open Terminal and Navigate correctly
+### Step 2: Install JDK-JAVA
+When installing JDK-JAVA from the Oracle JDK download page 
+(e.g., JDK 21 -x64 for Intel, aarch64 for Apple Silicon)
+
+### Step 3: Open Terminal and Navigate correctly
 1.  Open **Terminal**.
 2.  Type `cd ` (type cd followed by a **space**, do not press Enter yet).
 3.  Find your project folder on your Desktop.
 4.  **Drag and Drop** that folder directly into the Terminal window. It will automatically type the correct path for you.
 5.  Press **Enter**.
 
-
 ### Step 3: Run the Setup
 Once you are successfully inside the folder (you should see the folder name in your Terminal prompt), copy and paste this **single line** and press Enter:
 ```bash
 chmod +x *.sh && ./install.sh
-
-# Might pop out a msg says 'Request install JDK".  Follow below  step to install and wait for it to finish.
-Go to the Oracle JDK download page or the Adoptium (Eclipse Temurin) download page (recommended – open source and free).
-Using Adoptium as an example:
-
-Choose the Java version you need (e.g., Java 17 or 21 LTS)
-
-Select macOS as the operating system
-
-Choose the architecture based on your Mac’s chip:
-
-x64 for Intel
-
-aarch64 for Apple Silicon
-
-Download the .pkg or .dmg file
-
-Install
-Double-click the downloaded .dmg file (or directly open the .pkg file), follow the on‑screen prompts, and enter your Mac administrator password when asked.
-
-Verify
-Open Terminal and run:
-
-bash
-java -version
-If the installation succeeded, you will see version information. macOS usually sets up the java command path automatically.
-
-⚠️ Note: This method installs the JDK into /Library/Java/JavaVirtualMachines/, making it available to all users on the computer.
-```
 
 ### Step 4: Start the App
 After the installation finishes, just type:
