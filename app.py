@@ -2903,6 +2903,13 @@ class AutoAttendanceApp(ctk.CTk):
             # Check if git is installed
             subprocess.run(["git", "--version"], check=True, capture_output=True)
             
+            # Check if it's a git repo
+            is_git = subprocess.run(["git", "rev-parse", "--is-inside-work-tree"], cwd=os.getcwd(), capture_output=True)
+            if is_git.returncode != 0:
+                # Convert ZIP download into a git repo automatically
+                subprocess.run(["git", "init"], check=True, cwd=os.getcwd(), capture_output=True)
+                subprocess.run(["git", "remote", "add", "origin", "https://github.com/esproducers/TJC-Auto-Attendance.git"], cwd=os.getcwd(), capture_output=True)
+                
             # 3. Execution
             # We use git reset --hard origin/main to ensure the local code becomes identical to the server
             # This is the most reliable way to update for non-developers.
