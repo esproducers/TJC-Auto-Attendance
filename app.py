@@ -437,6 +437,7 @@ class AutoAttendanceApp(ctk.CTk):
         self.load_settings()
         last_cam = self.settings.get("last_camera_id", 0)
         self.backend  = InsightFaceAttendance(camera_id=last_cam)
+        self.backend.init_database() # Ensure DB is migrated before UI queries it
         self.reporter = ReportGenerator()
         
         self.after(500, self.initialize_face_engine)
