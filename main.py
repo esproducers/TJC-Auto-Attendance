@@ -192,6 +192,8 @@ class InsightFaceAttendance:
             c.execute("ALTER TABLE members ADD COLUMN remark TEXT DEFAULT ''")
         if 'age_category' not in mcols:
             c.execute("ALTER TABLE members ADD COLUMN age_category TEXT DEFAULT ''")
+        if 'title' not in mcols:
+            c.execute("ALTER TABLE members ADD COLUMN title TEXT DEFAULT ''")
         
         # One-time fix: set age_category to "" if DOB is empty
         c.execute("UPDATE members SET age_category='' WHERE dob IS NULL OR dob='' OR dob='--'")
