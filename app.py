@@ -3818,6 +3818,14 @@ class AutoAttendanceApp(ctk.CTk):
                     messagebox.showerror("Save Error", f"Could not update member record: {str(e)}", parent=popup)
                     return
             else:
+                # DUPLICATE NAME CHECK FOR NEW MEMBER
+                conn = sqlite3.connect("database/attendance.db")
+                exists_name = conn.execute("SELECT member_code FROM members WHERE name = ? COLLATE NOCASE", (name,)).fetchone()
+                conn.close()
+                if exists_name:
+                    if not messagebox.askyesno("Duplicate Name", f"A member with the name '{name}' already exists (ID: {exists_name[0]}).\n\nDo you want to proceed and create a new duplicate record?", parent=popup):
+                        return
+                        
                 # Register brand-new member
                 # Load extra fields schema
                 extra_entries = {}
@@ -4198,6 +4206,16 @@ class AutoAttendanceApp(ctk.CTk):
                 if not data["name"]:
                     messagebox.showwarning("Missing", "Name is required.", parent=dialog)
                     return
+                    
+                # DUPLICATE NAME CHECK FOR NEW MEMBER
+                if not code:
+                    conn = sqlite3.connect("database/attendance.db")
+                    exists_name = conn.execute("SELECT member_code FROM members WHERE name = ? COLLATE NOCASE", (data["name"],)).fetchone()
+                    conn.close()
+                    if exists_name:
+                        if not messagebox.askyesno("Duplicate Name", f"A member with the name '{data['name']}' already exists (ID: {exists_name[0]}).\n\nDo you want to proceed and create another record with the same name?", parent=dialog):
+                            return
+                            
                 # Use prefix if brand new member
                 prefix = self.settings.get("member_prefix", "") if not code else ""
                 try:
