@@ -203,6 +203,8 @@ class InsightFaceAttendance:
         scols = [row[1] for row in c.fetchall()]
         if 'target_count' not in scols:
             c.execute("ALTER TABLE sessions ADD COLUMN target_count INTEGER DEFAULT 0")
+        if 'seminar_type' not in scols:
+            c.execute("ALTER TABLE sessions ADD COLUMN seminar_type TEXT DEFAULT 'Other'")
 
         # Optimization Indexes
         c.execute("CREATE INDEX IF NOT EXISTS idx_attendance_sid ON attendance(session_id)")
