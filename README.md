@@ -77,8 +77,10 @@ Once you are successfully inside the folder (you should see the folder name in y
 ```bash
 chmod +x *.sh && ./install.sh
 
-#Note: If you see "Building wheel for opencv-python (pyproject.toml) ..." and it stuck for a long time, it's normal, just wait for it to finish. (Might take 1-3 hours on Mac)
 
+```
+
+# Note: If you see "Building wheel for opencv-python (pyproject.toml) ..." and it stuck for a long time, it's normal, just wait for it to finish. (Might take 1-3 hours on Mac)
 
 ### Step 5: Start the App
 After the installation finishes, just type:
