@@ -42,7 +42,7 @@ class InsightFaceAttendance:
             pass
 
         # InsightFace (Portable: root='./models' lets you keep the AI files in the project folder)
-        self.face_app = insightface.app.FaceAnalysis(name='buffalo_l', root='./models')
+        self.face_app = None
         self.is_prepared = False
         
         # Initialize basic attributes to prevent crashes before preparation
@@ -72,6 +72,8 @@ class InsightFaceAttendance:
 
     def prepare(self, ctx_id=-1, det_size=(640, 640)):
         """Prepare the FaceAnalysis app. Might download models if missing."""
+        if self.face_app is None:
+            self.face_app = insightface.app.FaceAnalysis(name='buffalo_l', root='./models')
         self.face_app.prepare(ctx_id=ctx_id, det_size=det_size)
         self.is_prepared = True
         
