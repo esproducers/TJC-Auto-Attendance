@@ -36,7 +36,7 @@ This guide explains how to set up the Auto-Attendance tracker on a **New Windows
 
 ## 💻 1. Windows Installation
 
-### Step 1: Install Python
+### Step 1: Install Python 3.10.0
 When installing Python from the official website, make sure to check the box: **"Add Python to PATH"**.
 
 ### Step 2: Download the Code
@@ -58,7 +58,7 @@ run.bat
 
 **## 🍎 2. Mac (macOS) Installation**
 9+-
-### Step 1: Install Python
+### Step 1: Install Python 3.10.0
 When installing Python from the official website
 
 ### Step 2: Install JDK-JAVA
@@ -72,12 +72,15 @@ When installing JDK-JAVA from the Oracle JDK download page
 4.  **Drag and Drop** that folder directly into the Terminal window. It will automatically type the correct path for you.
 5.  Press **Enter**.
 
-### Step 3: Run the Setup
+### Step 4: Run the Setup
 Once you are successfully inside the folder (you should see the folder name in your Terminal prompt), copy and paste this **single line** and press Enter:
 ```bash
 chmod +x *.sh && ./install.sh
 
-### Step 4: Start the App
+#Note: If you see "Building wheel for opencv-python (pyproject.toml) ..." and it stuck for a long time, it's normal, just wait for it to finish. (Might take 1-3 hours on Mac)
+
+
+### Step 5: Start the App
 After the installation finishes, just type:
 ```bash
 ./run.sh

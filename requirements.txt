@@ -9,3 +9,4 @@ Pillow
 fpdf
 openpyxl
 onnxruntime
+tkcalendar

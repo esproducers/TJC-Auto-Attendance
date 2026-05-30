@@ -1,4 +1,6 @@
 #!/bin/bash
+cd "$(dirname "$0")" || exit 1
+
 if [ ! -d "venv" ]; then
     echo "[!] Virtual environment not found. Running setup first..."
     ./install.sh
