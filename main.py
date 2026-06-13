@@ -346,6 +346,74 @@ class InsightFaceAttendance:
         
         return True, f"Import Finished: {added} added, {updated} updated."
 
+    def bulk_import_excel(self, excel_path, prefix="TJC"):
+        """Import members from an Excel file, skipping duplicate names."""
+        try:
+            df = pd.read_excel(excel_path)
+            
+            # Map expected columns to DB keys
+            col_map = {
+                "name": "name", "title": "title", "type": "type", "area": "area",
+                "age category": "age_category", "dob": "dob", "date of baptism": "baptism_date",
+                "phone": "phone", "email": "email", "address": "address", 
+                "holy spirit?": "has_holy_spirit", "remark": "remark"
+            }
+            
+            # Normalize column names in df for easier mapping
+            df.columns = [str(c).strip().lower() for c in df.columns]
+            
+            added = 0
+            skipped = 0
+            
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            for _, row in df.iterrows():
+                # Extract data based on mapped columns
+                data = {}
+                for df_col, db_col in col_map.items():
+                    if df_col in df.columns:
+                        val = row[df_col]
+                        if pd.isna(val):
+                            val = ""
+                        # Handle specific types
+                        if db_col == "has_holy_spirit":
+                            # Convert Yes/No or True/False to 1/0
+                            str_val = str(val).strip().lower()
+                            data[db_col] = 1 if str_val in ['1', 'yes', 'y', 'true', 't'] else 0
+                        elif isinstance(val, (datetime, pd.Timestamp)):
+                            data[db_col] = val.strftime('%d-%m-%Y')
+                        else:
+                            data[db_col] = str(val).strip()
+                
+                # Check Name
+                name = data.get("name", "")
+                if not name:
+                    continue # Skip empty names
+                
+                # Check for duplicates
+                exists = cursor.execute("SELECT 1 FROM members WHERE name = ? COLLATE NOCASE", (name,)).fetchone()
+                if exists:
+                    skipped += 1
+                    continue
+                
+                # Add extra fields (any columns not in the map)
+                for df_col in df.columns:
+                    if df_col not in col_map and df_col != "member_code" and df_col != "registration_date":
+                        val = row[df_col]
+                        if pd.isna(val): val = ""
+                        data[df_col.replace(' ', '_')] = str(val).strip()
+
+                # Save member using existing function to handle IDs and database insertion
+                self.register_member(data, prefix=prefix)
+                added += 1
+                
+            conn.close()
+            return True, f"Excel Import Finished: {added} added, {skipped} skipped (duplicate names)."
+            
+        except Exception as e:
+            return False, f"Failed to parse Excel file: {str(e)}"
+
     def register_member(self, data, force_code=None, prefix=""):
         """Insert or update a member. Returns the member code used."""
         code = force_code if force_code else self.get_next_member_code(prefix=prefix)

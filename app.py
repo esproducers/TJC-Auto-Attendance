@@ -1346,6 +1346,8 @@ class AutoAttendanceApp(ctk.CTk):
         self.bulk_pdf_btn.pack(side="top", pady=2)
         self.bulk_excel_btn = ctk.CTkButton(self.actions_f, text="📗 Excel Export", width=160, height=36, fg_color="#D1FAE5", text_color="#10B981", hover_color="#A7F3D0", font=("Arial", 11, "bold"), command=lambda: self.on_bulk_member_export("excel"))
         self.bulk_excel_btn.pack(side="top", pady=2)
+        self.bulk_excel_in_btn = ctk.CTkButton(self.actions_f, text="📗 Excel Import", width=160, height=36, fg_color="#DBEAFE", text_color="#3B82F6", hover_color="#BFDBFE", font=("Arial", 11, "bold"), command=self.on_bulk_excel_import)
+        self.bulk_excel_in_btn.pack(side="top", pady=2)
         
         self.refresh_members_ui_visibility()
 
@@ -2052,6 +2054,7 @@ class AutoAttendanceApp(ctk.CTk):
         fields_cfg = [
             ("📸 Profile Photo", "photo"),
             ("👤 Name", "name"),
+            ("🏅 Title", "title"),
             ("📊 Age Category", "age_category"),
             ("🏷 Member Type", "type"),
             ("📍 Area", "area"),
@@ -2107,6 +2110,22 @@ class AutoAttendanceApp(ctk.CTk):
         ok, msg = self.backend.bulk_import_archive(path)
         if ok:
             messagebox.showinfo("Import Success", msg)
+            self.refresh_member_table()
+        else:
+            messagebox.showerror("Import Failed", msg)
+
+    def on_bulk_excel_import(self):
+        from tkinter import filedialog
+        path = filedialog.askopenfilename(
+            filetypes=[("Excel files", "*.xlsx *.xls")],
+            title="Import Excel File"
+        )
+        if not path: return
+        
+        prefix = self.settings.get("member_prefix", "TJC")
+        ok, msg = self.backend.bulk_import_excel(path, prefix=prefix)
+        if ok:
+            messagebox.showinfo("Excel Import", msg)
             self.refresh_member_table()
         else:
             messagebox.showerror("Import Failed", msg)
@@ -4014,6 +4033,18 @@ class AutoAttendanceApp(ctk.CTk):
 
         return get_val, set_val
 
+    def delete_custom_field(self, field_name, parent_dialog):
+        if messagebox.askyesno("Delete Custom Field", f"Are you sure you want to delete the field '{field_name}'?\n\nWARNING: This will permanently remove this field and ALL its data for ALL members in the database.", parent=parent_dialog):
+            try:
+                conn = sqlite3.connect("database/attendance.db")
+                conn.execute(f"ALTER TABLE members DROP COLUMN {field_name}")
+                conn.commit()
+                conn.close()
+                messagebox.showinfo("Success", f"Field '{field_name}' has been deleted. Please close and reopen the dialog to see changes.", parent=parent_dialog)
+                parent_dialog.destroy()
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to delete field: {e}", parent=parent_dialog)
+
     def member_dialog(self, title, code=None, readonly=False):
         dialog = ctk.CTkToplevel(self)
         dialog.title(title)
@@ -4183,7 +4214,13 @@ class AutoAttendanceApp(ctk.CTk):
             ctk.CTkLabel(scroll, text="🛡️ Extra Information (Custom SQL Fields)", font=("Arial", 13, "bold"), text_color="#6366F1").pack(anchor="w", pady=(0, 10))
             
             for f_name in extra_fields:
-                ctk.CTkLabel(scroll, text=f_name.replace("_", " ").upper(), font=("Arial", 11, "bold")).pack(anchor="w", pady=(8, 0))
+                f_hdr = ctk.CTkFrame(scroll, fg_color="transparent")
+                f_hdr.pack(fill="x", pady=(8, 0))
+                ctk.CTkLabel(f_hdr, text=f_name.replace("_", " ").upper(), font=("Arial", 11, "bold")).pack(side="left")
+                if not readonly and self.is_admin:
+                    btn_del = ctk.CTkButton(f_hdr, text="Delete Field", fg_color="#EF4444", hover_color="#DC2626", width=80, height=24, font=("Arial", 10, "bold"), command=lambda f=f_name: self.delete_custom_field(f, dialog))
+                    btn_del.pack(side="right")
+                
                 ent = ctk.CTkEntry(scroll, width=400)
                 ent.insert(0, str(existing.get(f_name, "")) if existing.get(f_name) is not None else "")
                 ent.pack(pady=4)

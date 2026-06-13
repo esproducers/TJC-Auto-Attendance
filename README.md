@@ -88,8 +88,14 @@ After the installation finishes, just Double-click:
 Mac_Start.command
 ```
 
+> [!WARNING]
+> **Troubleshooting: "could not be executed because you do not have appropriate access privileges"**
+> If you get this error when double-clicking `Mac_Start.command`, open your Terminal, type `chmod +x ` (make sure there is a space at the end), then drag and drop the `Mac_Start.command` file into the terminal and press Enter. This grants your Mac permission to run the file.
+
 > [!IMPORTANT]
 > macOS will ask for permission to access the **Camera**. You must click **"Allow"** for the facial recognition to work.
+
+
 
 ## ✨ Pro Tip: Create a Desktop Shortcut
 To make it even easier for others, you can create a shortcut on your desktop:
@@ -101,7 +107,7 @@ To make it even easier for others, you can create a shortcut on your desktop:
 
 ### Mac (macOS)
 1. Open the project folder.
-2. **Right-click** `run.sh` > **Make Alias**.
+2. **Right-click** `Mac_Start.command` > **Make Alias**.
 3. Drag the **Alias** to your desktop and rename it.
 
 ---
@@ -122,9 +128,23 @@ To make it even easier for others, you can create a shortcut on your desktop:
   - While logged in: Go to **Settings** > **Update Admin Password**.
 
 ### 📸 Camera Management
-- The system supports multiple cameras (e.g., Built-in + USB).
+- The system supports multiple cameras (e.g., Built-in + USB + WiFi).
 - Select your preferred camera from the **Sidebar Dropdown**.
 - Use the **🔄 Refresh** button to detect new USB cameras without restarting.
+
+#### 📡 WiFi Camera Setup & Troubleshooting
+The **Auto Search WiFi** feature relies on standard network broadcasting protocols (ONVIF/SSDP). However, it may fail to find your camera automatically due to:
+1. **Mac Firewall:** Macs have strict built-in firewalls that often block the incoming network broadcast responses.
+2. **Camera Security:** If you are using a **TP-Link Tapo** camera, TP-Link disables the video stream by default. You must open the Tapo app on your phone, go to **Camera Settings -> Advanced Settings -> Camera Account**, and create a username/password to activate the stream.
+3. **Router Isolation:** Sometimes Mesh routers (like TP-Link Deco) isolate devices so they can't talk to each other directly.
+
+**The Fix (Manual Add):**
+Since the automatic search can be blocked by security settings, it is much faster and more reliable to use the red **`+ Add URL`** button right underneath it!
+1. Find the camera's IP address in your router app (e.g., `192.168.68.105`).
+2. Click the red **`+ Add URL`** button in the Auto-Attendance app.
+3. Type in the direct video link. If it's a Tapo camera, it will look exactly like this: 
+   `rtsp://your_username:your_password@192.168.68.105:554/stream1`
+   *(Replace `your_username` and `your_password` with the camera account details you set up in the Tapo app, and replace the IP address with your real one).*
 
 ### 📅 Seminar Reporting (Annual Report)
 - When clicking **"Start"** on the Dashboard, you must select the **Seminar Type**:
