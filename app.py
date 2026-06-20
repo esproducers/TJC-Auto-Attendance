@@ -3858,12 +3858,12 @@ class AutoAttendanceApp(ctk.CTk):
                 conn = sqlite3.connect("database/attendance.db")
                 cursor = conn.cursor()
                 cursor.execute("PRAGMA table_info(members)")
-                db_cols = [row[1] for row in cursor.fetchall()]
+                db_cols = [row[1].lower() for row in cursor.fetchall()]
                 conn.close()
                 
                 standard_fields = ["member_code", "name", "type", "age", "dob", "baptism_date", 
                                    "address", "email", "phone", "has_holy_spirit", "image_path", 
-                                   "registration_date", "area", "remark", "age_category"]
+                                   "registration_date", "area", "remark", "age_category", "title"]
                 extra_fields = [c for c in db_cols if c not in standard_fields]
                 
                 # Show extra fields in UI before save (optional, but requested to reflect)
@@ -4063,19 +4063,20 @@ class AutoAttendanceApp(ctk.CTk):
             # Get columns dynamically
             cursor = conn.cursor()
             cursor.execute("PRAGMA table_info(members)")
-            db_cols = [row[1] for row in cursor.fetchall()]
+            db_cols = [row[1].lower() for row in cursor.fetchall()]
             
             if code:
                 # Use pandas for easy dict conversion
                 df = pd.read_sql("SELECT * FROM members WHERE member_code=?", conn, params=[code])
                 if not df.empty:
-                    existing = df.iloc[0].to_dict()
+                    # Normalize keys to lowercase for robust matching
+                    existing = {str(k).lower(): v for k, v in df.iloc[0].to_dict().items()}
         except: pass
         finally: conn.close()
 
         standard_fields = ["member_code", "name", "type", "age", "dob", "baptism_date", 
                            "address", "email", "phone", "has_holy_spirit", "image_path", 
-                           "registration_date", "area", "remark", "age_category"]
+                           "registration_date", "area", "remark", "age_category", "title"]
         extra_fields = [c for c in db_cols if c not in standard_fields]
 
         # ── Profile Photo ──────────────────────────────────────────────────────
