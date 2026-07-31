@@ -437,6 +437,10 @@ class AutoAttendanceApp(ctk.CTk):
         self.load_settings()
         last_cam = self.settings.get("last_camera_id", 0)
         self.backend  = InsightFaceAttendance(camera_id=last_cam)
+        bright_enabled = self.settings.get("bright_light_compensation", False)
+        self.backend.set_bright_light_mode(bright_enabled)
+        bright_params = self.settings.get("bright_light_params", {"gain": 1.0, "contrast": 1.0, "saturation": 1.0, "white_balance": 0.0})
+        self.backend.set_bright_light_params(bright_params)
         self.backend.init_database() # Ensure DB is migrated before UI queries it
         self.reporter = ReportGenerator()
         
@@ -736,10 +740,60 @@ class AutoAttendanceApp(ctk.CTk):
                 messagebox.showerror("Error", f"Failed to open {choice}")
             else:
                 print(f"[INFO] Switched to {choice}")
+                if hasattr(self, 'bright_var'):
+                    self.backend.set_bright_light_mode(self.bright_var.get())
                 self.settings["last_camera_id"] = cam_id
                 self.save_settings()
         except Exception as e:
             messagebox.showerror("Error", f"Camera switch failed: {e}")
+
+    def on_bright_light_toggle(self):
+        enabled = self.bright_var.get()
+        self.settings["bright_light_compensation"] = enabled
+        self.save_settings()
+        if hasattr(self, 'backend') and self.backend:
+            self.backend.set_bright_light_mode(enabled)
+            status_str = "ENABLED (WDR Color-Preserved Mode active)" if enabled else "DISABLED"
+            print(f"[INFO] Bright Light / WDR Compensation: {status_str}")
+
+        if hasattr(self, 'bright_adjust_frame'):
+            if enabled:
+                self.bright_adjust_frame.pack(fill="x", pady=(5, 5))
+            else:
+                self.bright_adjust_frame.pack_forget()
+
+    def _update_bright_light_params(self, *args):
+        if not hasattr(self, 'bright_gain_slider'): return
+        gain = round(self.bright_gain_slider.get(), 2)
+        contrast = round(self.bright_contrast_slider.get(), 2)
+        saturation = round(self.bright_sat_slider.get(), 2)
+        wb = round(self.bright_wb_slider.get(), 0)
+
+        if hasattr(self, 'bright_gain_lbl'): self.bright_gain_lbl.configure(text=f"{gain:.2f}x")
+        if hasattr(self, 'bright_contrast_lbl'): self.bright_contrast_lbl.configure(text=f"{contrast:.2f}x")
+        if hasattr(self, 'bright_sat_lbl'): self.bright_sat_lbl.configure(text=f"{saturation:.2f}x")
+        if hasattr(self, 'bright_wb_lbl'):
+            wb_str = f"{int(wb):+d}" if wb != 0 else "0 (Auto)"
+            self.bright_wb_lbl.configure(text=wb_str)
+
+        params = {
+            "gain": gain,
+            "contrast": contrast,
+            "saturation": saturation,
+            "white_balance": wb
+        }
+        self.settings["bright_light_params"] = params
+        self.save_settings()
+        if hasattr(self, 'backend') and self.backend:
+            self.backend.set_bright_light_params(params)
+
+    def reset_bright_light_params(self):
+        if not hasattr(self, 'bright_gain_slider'): return
+        self.bright_gain_slider.set(1.0)
+        self.bright_contrast_slider.set(1.0)
+        self.bright_sat_slider.set(1.0)
+        self.bright_wb_slider.set(0)
+        self._update_bright_light_params()
 
     def add_wifi_camera_dialog(self):
         dialog = ctk.CTkInputDialog(
@@ -1166,6 +1220,83 @@ class AutoAttendanceApp(ctk.CTk):
         Tooltip(self.cam_refresh_btn, "Refresh to search active camera")
         
         self.cam_menu.pack(side="left", fill="x", expand=True, padx=(0, 5))
+        
+        # Bright Light / Doorway Background WDR Compensation Switch
+        bright_saved = self.settings.get("bright_light_compensation", False)
+        self.bright_var = ctk.BooleanVar(value=bright_saved)
+        self.bright_switch = ctk.CTkSwitch(
+            cam_inner,
+            text="☀️ Bright Light / WDR (Color Preserved)",
+            font=("Arial", 11, "bold"),
+            variable=self.bright_var,
+            command=self.on_bright_light_toggle,
+            progress_color="#F59E0B"
+        )
+        self.bright_switch.pack(anchor="w", pady=(10, 2))
+        Tooltip(self.bright_switch, "Wide Dynamic Range (WDR): lifts dark faces under harsh doorway backlight while preserving rich, natural clear colors (like phone camera HDR)")
+
+        # Manual Adjustment Controls for Bright Light WDR Mode (Gain, Contrast, Saturation, White Balance)
+        saved_params = self.settings.get("bright_light_params", {"gain": 1.0, "contrast": 1.0, "saturation": 1.0, "white_balance": 0.0})
+        
+        self.bright_adjust_frame = ctk.CTkFrame(cam_inner, fg_color="#F8FAFC", corner_radius=8, border_width=1, border_color="#E2E8F0")
+        
+        # Header with Reset button
+        hdr_f = ctk.CTkFrame(self.bright_adjust_frame, fg_color="transparent")
+        hdr_f.pack(fill="x", padx=8, pady=(6, 2))
+        ctk.CTkLabel(hdr_f, text="🎛️ Manual Bright Light Settings", font=("Arial", 10, "bold"), text_color="#334155").pack(side="left")
+        
+        reset_btn = ctk.CTkButton(hdr_f, text="↺ Reset", font=("Arial", 9), width=48, height=20, fg_color="#E2E8F0", text_color="#334155", hover_color="#CBD5E1", command=self.reset_bright_light_params)
+        reset_btn.pack(side="right")
+        Tooltip(reset_btn, "Reset Gain, Contrast, Saturation, and White Balance to default values")
+
+        # 1. Gain Slider
+        f_gain = ctk.CTkFrame(self.bright_adjust_frame, fg_color="transparent")
+        f_gain.pack(fill="x", padx=8, pady=2)
+        ctk.CTkLabel(f_gain, text="Gain", font=("Arial", 10), width=75, anchor="w", text_color="#475569").pack(side="left")
+        self.bright_gain_slider = ctk.CTkSlider(f_gain, from_=0.5, to=2.0, number_of_steps=30, height=14, command=self._update_bright_light_params)
+        self.bright_gain_slider.set(saved_params.get("gain", 1.0))
+        self.bright_gain_slider.pack(side="left", fill="x", expand=True, padx=4)
+        self.bright_gain_lbl = ctk.CTkLabel(f_gain, text=f"{saved_params.get('gain', 1.0):.2f}x", font=("Arial", 10, "bold"), width=42, anchor="e", text_color="#0284C7")
+        self.bright_gain_lbl.pack(side="right")
+        Tooltip(f_gain, "WDR Gain / Shadow Lift Strength: increases shadow brightness on backlit faces")
+
+        # 2. Contrast Slider
+        f_contrast = ctk.CTkFrame(self.bright_adjust_frame, fg_color="transparent")
+        f_contrast.pack(fill="x", padx=8, pady=2)
+        ctk.CTkLabel(f_contrast, text="Contrast", font=("Arial", 10), width=75, anchor="w", text_color="#475569").pack(side="left")
+        self.bright_contrast_slider = ctk.CTkSlider(f_contrast, from_=0.5, to=2.0, number_of_steps=30, height=14, command=self._update_bright_light_params)
+        self.bright_contrast_slider.set(saved_params.get("contrast", 1.0))
+        self.bright_contrast_slider.pack(side="left", fill="x", expand=True, padx=4)
+        self.bright_contrast_lbl = ctk.CTkLabel(f_contrast, text=f"{saved_params.get('contrast', 1.0):.2f}x", font=("Arial", 10, "bold"), width=42, anchor="e", text_color="#0284C7")
+        self.bright_contrast_lbl.pack(side="right")
+        Tooltip(f_contrast, "Contrast adjustment: increases or decreases image contrast")
+
+        # 3. Saturation Slider
+        f_sat = ctk.CTkFrame(self.bright_adjust_frame, fg_color="transparent")
+        f_sat.pack(fill="x", padx=8, pady=2)
+        ctk.CTkLabel(f_sat, text="Saturation", font=("Arial", 10), width=75, anchor="w", text_color="#475569").pack(side="left")
+        self.bright_sat_slider = ctk.CTkSlider(f_sat, from_=0.5, to=2.0, number_of_steps=30, height=14, command=self._update_bright_light_params)
+        self.bright_sat_slider.set(saved_params.get("saturation", 1.0))
+        self.bright_sat_slider.pack(side="left", fill="x", expand=True, padx=4)
+        self.bright_sat_lbl = ctk.CTkLabel(f_sat, text=f"{saved_params.get('saturation', 1.0):.2f}x", font=("Arial", 10, "bold"), width=42, anchor="e", text_color="#0284C7")
+        self.bright_sat_lbl.pack(side="right")
+        Tooltip(f_sat, "Color Saturation: adjusts overall color richness and vibrancy")
+
+        # 4. White Balance Slider
+        f_wb = ctk.CTkFrame(self.bright_adjust_frame, fg_color="transparent")
+        f_wb.pack(fill="x", padx=8, pady=(2, 6))
+        ctk.CTkLabel(f_wb, text="White Bal", font=("Arial", 10), width=75, anchor="w", text_color="#475569").pack(side="left")
+        self.bright_wb_slider = ctk.CTkSlider(f_wb, from_=-50, to=50, number_of_steps=50, height=14, command=self._update_bright_light_params)
+        wb_init = saved_params.get("white_balance", 0.0)
+        self.bright_wb_slider.set(wb_init)
+        self.bright_wb_slider.pack(side="left", fill="x", expand=True, padx=4)
+        wb_init_str = f"{int(wb_init):+d}" if wb_init != 0 else "0 (Auto)"
+        self.bright_wb_lbl = ctk.CTkLabel(f_wb, text=wb_init_str, font=("Arial", 10, "bold"), width=42, anchor="e", text_color="#0284C7")
+        self.bright_wb_lbl.pack(side="right")
+        Tooltip(f_wb, "White Balance / Color Warmth: -50 (Cooler/Blue) to +50 (Warmer/Yellow-Red)")
+
+        if bright_saved:
+            self.bright_adjust_frame.pack(fill="x", pady=(5, 5))
         
         self.search_wifi_cam_btn = ctk.CTkButton(cam_inner, text="🔍 Auto Search WiFi 📷", font=("Arial", 11, "bold"), height=30, fg_color="#3B82F6", text_color="white", hover_color="#2563EB", command=self.start_auto_search)
         self.search_wifi_cam_btn.pack(fill="x", pady=(10, 0))
@@ -3604,6 +3735,8 @@ class AutoAttendanceApp(ctk.CTk):
 
         ret, frame = self.backend.camera.read()
         if ret:
+            if getattr(self.backend, 'bright_light_mode', False):
+                frame = self.backend.apply_smart_bright_light_compensation(frame)
             self.last_frame = frame.copy()
             if self.is_marking:
                 # 1. Dispatch background thread if idle

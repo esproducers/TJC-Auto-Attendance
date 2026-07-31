@@ -9,6 +9,13 @@
     "member_prefix": "SK",
     "admin_pass": "admin123",
     "admin_hint": "skudai",
-    "last_auto_report_check": "2026-06-20",
-    "last_camera_id": 0
+    "last_auto_report_check": "2026-07-31",
+    "last_camera_id": 0,
+    "bright_light_compensation": false,
+    "bright_light_params": {
+        "gain": 1.0,
+        "contrast": 1.0,
+        "saturation": 1.0,
+        "white_balance": 0.0
+    }
 }

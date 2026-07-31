@@ -53,9 +53,115 @@ class InsightFaceAttendance:
         self.pending_unknowns = {}
         self.frame_count = 0
         self.process_every_n_frames = 5
+        # Bright light / doorway compensation state
+        self.bright_light_mode = False
+        self.bright_light_params = {
+            "gain": 1.0,
+            "contrast": 1.0,
+            "saturation": 1.0,
+            "white_balance": 0.0
+        }
         self.known_face_encodings = []
         self.known_face_names = []
         self.known_face_ids = []
+
+    def set_bright_light_mode(self, enabled: bool):
+        """Enable or disable software WDR bright background (doorway lighting) compensation."""
+        self.bright_light_mode = enabled
+        if hasattr(self, 'camera') and self.camera and self.camera.isOpened():
+            try:
+                # Maintain camera auto-exposure and auto-white-balance to preserve raw hardware color richness
+                self.camera.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.75) # DirectShow auto EV
+                self.camera.set(cv2.CAP_PROP_BRIGHTNESS, 128)
+            except Exception as e:
+                print(f"[WARN] Hardware camera exposure control error: {e}")
+
+    def set_bright_light_params(self, params: dict):
+        """Update manual adjustment settings (gain, contrast, saturation, white_balance) for Bright Light WDR mode."""
+        if hasattr(self, 'bright_light_params') and isinstance(params, dict):
+            self.bright_light_params.update(params)
+
+    def apply_smart_bright_light_compensation(self, frame):
+        """
+        Smart WDR (Wide Dynamic Range) illumination & backlight compensation algorithm.
+        Lifts backlit human face & foreground shadows while strictly preserving vibrant,
+        natural colors and preventing overexposure of bright doorway/window backgrounds.
+        Supports manual fine-tuning for gain, contrast, saturation, and white balance.
+        """
+        if frame is None or not self.bright_light_mode:
+            return frame
+        try:
+            params = getattr(self, 'bright_light_params', {})
+            gain_val = float(params.get('gain', 1.0))
+            contrast_val = float(params.get('contrast', 1.0))
+            sat_val = float(params.get('saturation', 1.0))
+            wb_val = float(params.get('white_balance', 0.0))
+
+            # 1. Convert BGR to HSV color space for independent Hue, Saturation, Value processing
+            hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV).astype(np.float32)
+            h, s, v = cv2.split(hsv)
+            
+            # 2. Extract smooth local illumination map using Gaussian blur (Retinex illumination principle)
+            blur_ksize = max(31, (int(frame.shape[1] * 0.08) // 2) * 2 + 1)
+            illumination_map = cv2.GaussianBlur(v, (blur_ksize, blur_ksize), 0) / 255.0
+            
+            # 3. Calculate local dynamic shadow mask: 1.0 in deep shadows (backlit face), 0.0 in bright areas (doorway)
+            shadow_mask = 1.0 - illumination_map
+            
+            # Adaptive local gamma curve modulated by manual WDR Gain setting
+            v_norm = v / 255.0
+            gamma_map = 1.0 - (shadow_mask * 0.45 * gain_val)
+            v_lifted = np.power(v_norm, np.maximum(0.2, gamma_map)) * 255.0
+            
+            # Blend with controlled CLAHE on luminance to enhance sharp facial details
+            v_uint8 = np.clip(v_lifted, 0, 255).astype(np.uint8)
+            clahe = cv2.createCLAHE(clipLimit=1.8, tileGridSize=(8, 8))
+            v_clahe = clahe.apply(v_uint8).astype(np.float32)
+            
+            v_final = 0.65 * v_lifted + 0.35 * v_clahe
+            
+            # Apply manual Contrast adjustment on Value channel
+            if contrast_val != 1.0:
+                v_final = (v_final - 128.0) * contrast_val + 128.0
+            v_final = np.clip(v_final, 0, 255)
+            
+            # 4. COLOR PRESERVATION & SATURATION BOOST:
+            #    Proportionally boost saturation (S) in lifted shadow regions so skin & clothes retain full color
+            lum_gain = np.where(v > 1.0, v_final / (v + 1e-5), 1.0)
+            sat_boost_factor = np.power(lum_gain, 0.55)
+            s_final = s * sat_boost_factor
+            
+            # Protect & boost warm skin-tone hues (H in [0..25] or [165..180]) in shadow areas
+            skin_mask = (((h >= 0) & (h <= 25)) | ((h >= 165) & (h <= 180))).astype(np.float32)
+            s_final += skin_mask * shadow_mask * 15.0 * gain_val
+            
+            # Apply manual Saturation multiplier
+            if sat_val != 1.0:
+                s_final = s_final * sat_val
+            s_final = np.clip(s_final, 0, 255)
+            
+            # 5. Merge channels back and convert to BGR
+            enhanced_hsv = cv2.merge([h, s_final, v_final]).astype(np.uint8)
+            enhanced_bgr = cv2.cvtColor(enhanced_hsv, cv2.COLOR_HSV2BGR)
+            
+            # 6. Apply manual White Balance adjustment (Color Warmth / Tint)
+            if wb_val != 0.0:
+                bgr_float = enhanced_bgr.astype(np.float32)
+                wb_factor = wb_val / 100.0  # -0.5 to +0.5
+                if wb_factor > 0:
+                    # Warmer: boost Red, slightly reduce Blue
+                    bgr_float[:, :, 2] *= (1.0 + wb_factor * 0.4)
+                    bgr_float[:, :, 0] *= (1.0 - wb_factor * 0.2)
+                else:
+                    # Cooler: boost Blue, slightly reduce Red
+                    bgr_float[:, :, 0] *= (1.0 - wb_factor * 0.4)
+                    bgr_float[:, :, 2] *= (1.0 + wb_factor * 0.2)
+                enhanced_bgr = np.clip(bgr_float, 0, 255).astype(np.uint8)
+                
+            return enhanced_bgr
+        except Exception as e:
+            print(f"[WARN] Smart WDR bright light frame processing error: {e}")
+            return frame
 
     def switch_camera(self, camera_id):
         """Release current camera and open a new one."""
@@ -68,6 +174,8 @@ class InsightFaceAttendance:
             self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
         except Exception:
             pass
+        if hasattr(self, 'bright_light_mode') and self.bright_light_mode:
+            self.set_bright_light_mode(True)
         return self.camera.isOpened()
 
     def prepare(self, ctx_id=-1, det_size=(640, 640)):
