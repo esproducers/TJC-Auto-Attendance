@@ -71,6 +71,19 @@ class ReportGenerator:
             "Area Total": area_total,
             "Total Sys Members": total_sys_m
         }
+    def create_indexes(self):
+        """创建数据库索引以加速查询"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            c = conn.cursor()
+            c.execute("CREATE INDEX IF NOT EXISTS idx_session ON attendance(session_id)")
+            c.execute("CREATE INDEX IF NOT EXISTS idx_time ON attendance(check_in_time)")
+            c.execute("CREATE INDEX IF NOT EXISTS idx_member_code ON attendance(member_code)")
+            conn.commit()
+            conn.close()
+            print("[DB] Indexes created successfully")
+        except Exception as e:
+            print(f"[DB] Error creating indexes: {e}")
 
     def generate_excel(self, session_ids=None, out_path=None, summary=False, default_area=None):
         if isinstance(session_ids, int):

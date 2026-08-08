@@ -4,6 +4,8 @@ import socket
 import ipaddress
 import shutil
 import uuid
+import warnings
+warnings.filterwarnings("ignore", category=FutureWarning)
 from tkcalendar import DateEntry
 
 # --- CONFIDENTIAL DATA FIREWALL (BLOCKS ALL NETWORK TRAFFIC EXCEPT LOCAL LAN) ---
@@ -443,6 +445,10 @@ class AutoAttendanceApp(ctk.CTk):
         self.backend.set_bright_light_params(bright_params)
         self.backend.init_database() # Ensure DB is migrated before UI queries it
         self.reporter = ReportGenerator()
+        try:
+            self.reporter.create_indexes()
+        except Exception as e:
+            print(f"[DB] Index creation skipped/error: {e}")
         
         self.after(500, self.initialize_face_engine)
 
@@ -502,8 +508,19 @@ class AutoAttendanceApp(ctk.CTk):
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
         self.update_camera()
 
-        # Update README with admin info
-        self._update_readme_admin()
+    def add_member_async(self, data, force_code=None, prefix="", callback=None):
+        """Asynchronously register/update a member and extract face encoding to avoid UI freeze."""
+        def task():
+            try:
+                code = self.backend.register_member(data, force_code=force_code, prefix=prefix)
+                if callback:
+                    self.after(0, lambda: callback(True, code, None))
+            except Exception as e:
+                print(f"[ERROR] add_member_async failed: {e}")
+                if callback:
+                    self.after(0, lambda: callback(False, None, str(e)))
+
+        threading.Thread(target=task, daemon=True).start()
 
     def initialize_face_engine(self):
         """Attempts to load AI models, asking for temporary internet access if they are missing."""
@@ -557,9 +574,7 @@ class AutoAttendanceApp(ctk.CTk):
         if hasattr(self, 'backend') and self.backend and self.backend.camera:
             self.backend.camera.release()
         self.destroy()
-
     # ── Settings ──────────────────────────────────────────────────────────────
-
     def load_settings(self):
         try:
             with open("settings.json") as f:
@@ -647,6 +662,7 @@ class AutoAttendanceApp(ctk.CTk):
                ("📜  Attendance Logs", "logs"), ("📊  Reports", "reports"),
                ("📅  Annually Report", "annually_report"),
                ("📊  Organization chart", "org_chart"),
+               ("🖼️  Image Cache", "cache_manager"),
                ("⚙  Settings", "settings"),
                ("🗄  SQL Data", "sql")]
         self.nav_buttons = {}
@@ -1082,8 +1098,12 @@ class AutoAttendanceApp(ctk.CTk):
         ctk.CTkButton(r_dialog, text="Reset & Login", width=260, height=35, command=reset).pack()
 
     def show_frame(self, page_id):
+        if page_id == "cache_manager":
+            self.show_image_cache_popup()
+            return
+
         # Restriction check
-        restricted = ["reports", "annually_report", "org_chart", "settings", "sql"]
+        restricted = ["reports", "annually_report", "org_chart", "cache_manager", "settings", "sql"]
         if page_id in restricted and not self.is_admin:
             messagebox.showwarning("Restricted", "Admin login required to access this page.")
             return
@@ -1100,6 +1120,145 @@ class AutoAttendanceApp(ctk.CTk):
                     btn.configure(fg_color="#F0F2F5", text_color="#007BFF")
                 else:
                     btn.configure(fg_color="transparent", text_color="#333")
+
+    def show_image_cache_popup(self):
+        popup = ctk.CTkToplevel(self)
+        popup.title("Captured Image Cache Manager")
+        popup.geometry("640x680")
+        popup.attributes("-topmost", True)
+        popup.grab_set()
+
+        ctk.CTkLabel(popup, text="🖼️  Captured Photo Storage & Cache",
+                     font=("Arial", 16, "bold")).pack(pady=(16, 8))
+
+        # Reassurance banner
+        banner = ctk.CTkFrame(popup, fg_color="#D1E7DD", border_width=1, border_color="#A3CFBB", corner_radius=8)
+        banner.pack(fill="x", padx=20, pady=4)
+        ctk.CTkLabel(banner, text="🛡️ SAFE CLEAN GUARANTEE: Deleting captured photo cache removes image files from disk to keep memory light.\nALL attendance check-in records, member data, and statistics remain 100% intact!",
+                     font=("Arial", 10, "bold"), text_color="#0F5132", justify="center").pack(padx=10, pady=8)
+
+        # Stats Container
+        stats_frame = ctk.CTkFrame(popup, fg_color="#F8F9FA", corner_radius=10)
+        stats_frame.pack(fill="x", padx=20, pady=10)
+
+        stats_inner = ctk.CTkFrame(stats_frame, fg_color="transparent")
+        stats_inner.pack(fill="x", padx=15, pady=10)
+
+        att_lbl = ctk.CTkLabel(stats_inner, text="📁 Attendance: 0 files (0 MB)", font=("Arial", 11))
+        att_lbl.pack(side="left", expand=True)
+
+        unk_lbl = ctk.CTkLabel(stats_inner, text="❓ Unknowns: 0 files (0 MB)", font=("Arial", 11))
+        unk_lbl.pack(side="left", expand=True)
+
+        total_lbl = ctk.CTkLabel(stats_inner, text="📦 Total: 0 files (0 MB)", font=("Arial", 12, "bold"), text_color="#0D6EFD")
+        total_lbl.pack(side="left", expand=True)
+
+        # Action Buttons Row
+        act_row = ctk.CTkFrame(popup, fg_color="transparent")
+        act_row.pack(fill="x", padx=20, pady=(0, 10))
+
+        ctk.CTkButton(act_row, text="🧹 Clear All Cache", font=("Arial", 11, "bold"),
+                       fg_color="#DC3545", hover_color="#BB2D3B", text_color="white", height=32,
+                       command=lambda: do_clear_all()).pack(side="left", padx=3)
+
+        ctk.CTkButton(act_row, text="🗑️ Clear Unknowns", font=("Arial", 11),
+                       fg_color="#FFC107", text_color="black", hover_color="#FFCA2C", height=32,
+                       command=lambda: do_clear_unknown()).pack(side="left", padx=3)
+
+        ctk.CTkButton(act_row, text="📅 > 30 Days", font=("Arial", 11),
+                       fg_color="#6C757D", text_color="white", hover_color="#5C636A", height=32,
+                       command=lambda: do_clear_older_30()).pack(side="left", padx=3)
+
+        ctk.CTkButton(act_row, text="🔄 Refresh", font=("Arial", 11),
+                       fg_color="#0D6EFD", text_color="white", hover_color="#0B5ED7", height=32,
+                       command=lambda: refresh_all()).pack(side="left", padx=3)
+
+        # Scrollable Files View Header
+        ctk.CTkLabel(popup, text="Cached Image Files:", font=("Arial", 12, "bold"), anchor="w").pack(fill="x", padx=20, pady=(5, 2))
+
+        files_scroll = ctk.CTkScrollableFrame(popup, fg_color="#F8F9FA", corner_radius=10, height=320)
+        files_scroll.pack(fill="both", expand=True, padx=20, pady=(0, 15))
+
+        def refresh_all():
+            for w in files_scroll.winfo_children():
+                w.destroy()
+
+            stats = self.backend.get_cache_stats()
+            att_lbl.configure(text=f"📁 Attendance: {stats['attendance_count']} files ({stats['attendance_mb']} MB)")
+            unk_lbl.configure(text=f"❓ Unknowns: {stats['unknown_count']} files ({stats['unknown_mb']} MB)")
+            total_lbl.configure(text=f"📦 Total Cache: {stats['total_count']} files ({stats['total_mb']} MB)")
+
+            file_list = self.backend.list_captured_cache_files()
+            if not file_list:
+                ctk.CTkLabel(files_scroll, text="✨ No captured image files found in cache folders.\n(Your image cache is clean!)",
+                             font=("Arial", 12), text_color="gray").pack(pady=40)
+                return
+
+            for fi in file_list:
+                f_path = fi['path']
+                f_name = fi['name']
+                f_cat = fi['category']
+                f_size = fi['size_kb']
+                f_date = fi['mtime_str']
+
+                row = ctk.CTkFrame(files_scroll, fg_color="#FFFFFF", corner_radius=6, height=46, border_width=1, border_color="#E5E7EB")
+                row.pack(fill="x", pady=2, padx=2)
+                row.pack_propagate(False)
+
+                # Thumbnail preview icon
+                img_f = ctk.CTkFrame(row, width=34, height=34, fg_color="transparent")
+                img_f.pack(side="left", padx=6, pady=4)
+                img_f.pack_propagate(False)
+                img_lbl = ctk.CTkLabel(img_f, text="📷", font=("Arial", 12))
+                img_lbl.pack(expand=True)
+
+                if os.path.exists(f_path):
+                    try:
+                        pil = Image.open(f_path).resize((30, 30))
+                        ci = ctk.CTkImage(light_image=pil, dark_image=pil, size=(30, 30))
+                        img_lbl.configure(image=ci, text="")
+                    except: pass
+
+                info_f = ctk.CTkFrame(row, fg_color="transparent")
+                info_f.pack(side="left", fill="both", expand=True, padx=4)
+
+                cat_color = "#28A745" if "Attendance" in f_cat else "#F59E0B"
+                ctk.CTkLabel(info_f, text=f"{f_name}", font=("Arial", 10, "bold"), anchor="w").pack(pady=(4, 0), fill="x")
+                ctk.CTkLabel(info_f, text=f"[{f_cat}] • {f_size} KB • {f_date}", font=("Arial", 9), text_color=cat_color, anchor="w").pack(fill="x")
+
+                # Single File Delete
+                def del_file(fp=f_path):
+                    if self.backend.delete_single_cache_file(fp):
+                        refresh_all()
+
+                ctk.CTkButton(row, text="🗑️", width=28, height=28, font=("Arial", 10),
+                               fg_color="transparent", text_color="#DC3545", hover_color="#FEE2E2",
+                               command=del_file).pack(side="right", padx=6)
+
+        def do_clear_all():
+            if messagebox.askyesno("Confirm Clear All Cache",
+                                   "Are you sure you want to delete all captured attendance snapshot images?\n\n"
+                                   "• Physical image files will be removed from disk.\n"
+                                   "• Attendance check-in logs & stats will NOT be deleted.", parent=popup):
+                count, mb = self.backend.clear_captured_image_cache(mode='all')
+                refresh_all()
+                messagebox.showinfo("Cache Cleared", f"Successfully deleted {count} photo files and freed {mb} MB!\nAttendance logs were preserved.", parent=popup)
+
+        def do_clear_unknown():
+            if messagebox.askyesno("Confirm Clear Unknowns",
+                                   "Delete only captured unknown face photos from disk?", parent=popup):
+                count, mb = self.backend.clear_captured_image_cache(mode='unknown')
+                refresh_all()
+                messagebox.showinfo("Cache Cleared", f"Successfully deleted {count} unknown photo files ({mb} MB).", parent=popup)
+
+        def do_clear_older_30():
+            if messagebox.askyesno("Confirm Selective Clear",
+                                   "Delete captured photo files older than 30 days?", parent=popup):
+                count, mb = self.backend.clear_captured_image_cache(mode='all', days_older_than=30)
+                refresh_all()
+                messagebox.showinfo("Cache Cleared", f"Deleted {count} photos older than 30 days ({mb} MB freed).", parent=popup)
+
+        refresh_all()
 
     def _display_logo(self, master):
         lp = self.settings.get("logo_path", "")
@@ -3295,9 +3454,19 @@ class AutoAttendanceApp(ctk.CTk):
     # ── Navigation ────────────────────────────────────────────────────────────
 
     def show_frame(self, name):
+        if name == "cache_manager":
+            self.show_image_cache_popup()
+            return
+
+        restricted = ["reports", "annually_report", "org_chart", "cache_manager", "settings", "sql"]
+        if name in restricted and not self.is_admin:
+            messagebox.showwarning("Restricted", "Admin login required to access this page.")
+            return
+
         for f in self.frames.values():
             f.grid_forget()
-        self.frames[name].grid(row=0, column=0, sticky="nsew")
+        if name in self.frames:
+            self.frames[name].grid(row=0, column=0, sticky="nsew")
         self.page_title.configure(text=name.replace("_", " ").title())
         for k, btn in self.nav_buttons.items():
             btn.configure(fg_color="#007BFF" if k == name else "transparent",
@@ -3364,15 +3533,48 @@ class AutoAttendanceApp(ctk.CTk):
                          font=("Arial", 11), text_color="gray").pack(pady=8)
             return
         for att_id, img_path, t in rows:
-            r = ctk.CTkFrame(self.waiting_scroll, fg_color="#FFF3CD", corner_radius=6, height=48)
+            r = ctk.CTkFrame(self.waiting_scroll, fg_color="#FEF3C7", corner_radius=8, height=54, border_width=1, border_color="#FCD34D")
             r.pack(fill="x", pady=3)
             r.pack_propagate(False)
-            ctk.CTkLabel(r, text=f"  Unknown  {str(t)[:16]}",
-                         font=("Arial", 10), anchor="w").pack(side="left", padx=6, fill="x", expand=True)
-            ctk.CTkButton(r, text="Identify", width=72, height=28, font=("Arial", 9),
-                           fg_color="#FFC107", text_color="black", hover_color="#E0A800",
+
+            # Photo preview thumbnail
+            img_f = ctk.CTkFrame(r, width=40, height=40, fg_color="transparent")
+            img_f.pack(side="left", padx=(6, 2), pady=6)
+            img_f.pack_propagate(False)
+            img_lbl = ctk.CTkLabel(img_f, text="👤", font=("Arial", 14))
+            img_lbl.pack(expand=True)
+            if img_path and os.path.exists(img_path):
+                try:
+                    pil = Image.open(img_path).resize((36, 36))
+                    ci = ctk.CTkImage(light_image=pil, dark_image=pil, size=(36, 36))
+                    img_lbl.configure(image=ci, text="")
+                except: pass
+
+            info_f = ctk.CTkFrame(r, fg_color="transparent")
+            info_f.pack(side="left", fill="both", expand=True, padx=4)
+            time_str = str(t)[11:19] if len(str(t)) >= 19 else str(t)[:16]
+            ctk.CTkLabel(info_f, text="❓ Unknown", font=("Arial", 11, "bold"), text_color="#92400E", anchor="w").pack(pady=(6, 0), fill="x")
+            ctk.CTkLabel(info_f, text=f"Captured {time_str}", font=("Arial", 9), text_color="#B45309", anchor="w").pack(fill="x")
+
+            btn_f = ctk.CTkFrame(r, fg_color="transparent")
+            btn_f.pack(side="right", padx=6)
+
+            ctk.CTkButton(btn_f, text="Identify", width=65, height=28, font=("Arial", 9, "bold"),
+                           fg_color="#F59E0B", text_color="white", hover_color="#D97706",
                            command=lambda aid=att_id, ip=img_path:
-                           self.identify_unknown_popup(aid, ip)).pack(side="right", padx=6)
+                           self.identify_unknown_popup(aid, ip)).pack(side="left", padx=2)
+
+            ctk.CTkButton(btn_f, text="❌", width=26, height=28, font=("Arial", 9, "bold"),
+                           fg_color="transparent", text_color="#DC3545", hover_color="#FEE2E2",
+                           command=lambda aid=att_id: self.dismiss_unknown(aid)).pack(side="left", padx=1)
+
+    def dismiss_unknown(self, att_id):
+        conn = sqlite3.connect("database/attendance.db")
+        conn.execute("DELETE FROM attendance WHERE id=?", (att_id,))
+        conn.commit()
+        conn.close()
+        self.refresh_stats()
+        self._refresh_waiting_panel()
 
     # ── Session Controls ──────────────────────────────────────────────────────
 
@@ -3779,8 +3981,7 @@ class AutoAttendanceApp(ctk.CTk):
                             else:
                                 self.activity_log.insert("end", f"[{ts}] ❓ Unknown face captured\n")
                                 if res.get('new'):
-                                    # unknown logic - stays in waiting list
-                                    pass
+                                    self._refresh_waiting_panel()
                             self.activity_log.see("end")
                 except queue.Empty:
                     pass
@@ -3822,7 +4023,7 @@ class AutoAttendanceApp(ctk.CTk):
     def identify_unknown_popup(self, att_id, img_path):
         popup = ctk.CTkToplevel(self)
         popup.title("Identify Person")
-        popup.geometry("480x580")
+        popup.geometry("480x620")
         popup.attributes("-topmost", True)
         popup.grab_set()
 
@@ -3831,8 +4032,8 @@ class AutoAttendanceApp(ctk.CTk):
 
         # Show the captured photo
         try:
-            pil = Image.open(img_path).resize((160, 160))
-            ci  = ctk.CTkImage(light_image=pil, dark_image=pil, size=(160, 160))
+            pil = Image.open(img_path).resize((140, 140))
+            ci  = ctk.CTkImage(light_image=pil, dark_image=pil, size=(140, 140))
             lbl = ctk.CTkLabel(popup, image=ci, text="")
             lbl.image = ci
             lbl.pack(pady=4)
@@ -3861,7 +4062,7 @@ class AutoAttendanceApp(ctk.CTk):
             conn.close()
             if m:
                 name_e.delete(0, "end");   name_e.insert(0, m[0] or "")
-                type_cb.set(m[1] or "Member")
+                type_cb.set(m[1] or "Area Member")
                 set_dob(m[2] or "")
                 area_e.delete(0, "end");   area_e.insert(0, m[3] or "")
                 phone_e.delete(0, "end");  phone_e.insert(0, m[4] or "")
@@ -3936,7 +4137,11 @@ class AutoAttendanceApp(ctk.CTk):
 
         hs_var = tk.BooleanVar(value=False)
         hs_cb = ctk.CTkCheckBox(form, text="Holy Spirit Received", variable=hs_var, font=("Arial", 12, "bold"))
-        hs_cb.pack(anchor="w", pady=10)
+        hs_cb.pack(anchor="w", pady=6)
+
+        save_photo_var = tk.BooleanVar(value=True)
+        save_photo_cb = ctk.CTkCheckBox(form, text="Save photo for future face recognition", variable=save_photo_var, font=("Arial", 11, "bold"))
+        save_photo_cb.pack(anchor="w", pady=6)
 
         ctk.CTkLabel(form, text="Remark", font=("Arial", 11, "bold")).pack(anchor="w", pady=(8, 0))
         remark_e = ctk.CTkTextbox(form, width=360, height=70) # ~3 lines
@@ -3953,9 +4158,9 @@ class AutoAttendanceApp(ctk.CTk):
 
             # --- DUPLICATE CHECK ---
             target_code = existing_code_e.get().strip() if action_var.get() == "link_existing" else None
-            if target_code:
+            if target_code and self.backend.active_session_id:
                 conn = sqlite3.connect("database/attendance.db")
-                exists = conn.execute("SELECT 1 FROM attendance WHERE session_id=? AND member_code=?", 
+                exists = conn.execute("SELECT 1 FROM attendance WHERE session_id=? AND member_code=? AND status != 'unknown'", 
                                      (self.backend.active_session_id, target_code)).fetchone()
                 conn.close()
                 if exists:
@@ -3969,10 +4174,24 @@ class AutoAttendanceApp(ctk.CTk):
                     messagebox.showwarning("Missing", "Member code required.", parent=popup)
                     return
                 try:
-                    # Update member title/details if needed
-                    self.backend.register_member({"name": name, "title": title_cb.get(), "type": m_type}, force_code=code)
-                    # Promote attendance row
-                    self.backend.identify_unknown(att_id, name, code, m_type)
+                    # Update member title/details in DB
+                    data = {
+                        "name": name,
+                        "type": m_type,
+                        "title": title_cb.get(),
+                        "dob": get_dob(),
+                        "baptism_date": get_bap(),
+                        "area": area_e.get().strip(),
+                        "address": address_e.get().strip(),
+                        "email": email_e.get().strip(),
+                        "phone": phone_e.get().strip(),
+                        "has_holy_spirit": hs_var.get(),
+                        "remark": remark_e.get("1.0", "end").strip(),
+                        "age_category": age_cat_var.get()
+                    }
+                    self.backend.register_member(data, force_code=code)
+                    # Promote attendance row & train face model instantly
+                    self.backend.identify_unknown(att_id, name, code, m_type, img_path=img_path, update_photo=save_photo_var.get())
                 except Exception as e:
                     messagebox.showerror("Save Error", f"Could not update member record: {str(e)}", parent=popup)
                     return
@@ -3986,24 +4205,6 @@ class AutoAttendanceApp(ctk.CTk):
                         return
                         
                 # Register brand-new member
-                # Load extra fields schema
-                extra_entries = {}
-                conn = sqlite3.connect("database/attendance.db")
-                cursor = conn.cursor()
-                cursor.execute("PRAGMA table_info(members)")
-                db_cols = [row[1].lower() for row in cursor.fetchall()]
-                conn.close()
-                
-                standard_fields = ["member_code", "name", "type", "age", "dob", "baptism_date", 
-                                   "address", "email", "phone", "has_holy_spirit", "image_path", 
-                                   "registration_date", "area", "remark", "age_category", "title"]
-                extra_fields = [c for c in db_cols if c not in standard_fields]
-                
-                # Show extra fields in UI before save (optional, but requested to reflect)
-                # For this quick popup, we'll just gather them if they were somehow in the form
-                # Actually, the user wants "add here will reflect to default list"
-                # So I should probably add them to the register_member_popup too.
-                
                 data = {
                     "name": name,
                     "type": m_type,
@@ -4021,9 +4222,10 @@ class AutoAttendanceApp(ctk.CTk):
                 }
                 prefix = self.settings.get("member_prefix", "")
                 code = self.backend.register_member(data, prefix=prefix)
-                self.backend.identify_unknown(att_id, name, code, m_type)
+                self.backend.identify_unknown(att_id, name, code, m_type, img_path=img_path, update_photo=True)
 
             self.refresh_stats()
+            self._refresh_waiting_panel()
             self.refresh_logs_table()
             
             # Show in captured list right away
