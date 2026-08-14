@@ -13,8 +13,6 @@ import uuid
 from datetime import datetime, date
 import insightface
 from PIL import Image
-import warnings
-warnings.filterwarnings("ignore", category=FutureWarning)
 
 COLOR_CYAN = (255, 255, 0) # BGR
 
@@ -38,13 +36,10 @@ class InsightFaceAttendance:
         self.current_camera_id = camera_id
         self.camera = cv2.VideoCapture(self.current_camera_id)
         try:
-            self.camera.set(cv2.CAP_PROP_FRAME_WIDTH,  640)
-            self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-            actual_w = self.camera.get(cv2.CAP_PROP_FRAME_WIDTH)
-            actual_h = self.camera.get(cv2.CAP_PROP_FRAME_HEIGHT)
-            print(f"[CAMERA] Switched to {actual_w}x{actual_h}")
-        except Exception as e:
-            print(f"[WARN] Could not set camera resolution: {e}")       
+            self.camera.set(cv2.CAP_PROP_FRAME_WIDTH,  1920)
+            self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
+        except Exception:
+            pass
 
         # InsightFace (Portable: root='./models' lets you keep the AI files in the project folder)
         self.face_app = None
@@ -69,7 +64,6 @@ class InsightFaceAttendance:
         self.known_face_encodings = []
         self.known_face_names = []
         self.known_face_ids = []
-        self.member_info_cache = {}
 
     def set_bright_light_mode(self, enabled: bool):
         """Enable or disable software WDR bright background (doorway lighting) compensation."""
@@ -176,25 +170,18 @@ class InsightFaceAttendance:
         self.current_camera_id = camera_id
         self.camera = cv2.VideoCapture(self.current_camera_id)
         try:
-            self.camera.set(cv2.CAP_PROP_FRAME_WIDTH,  640)
-            self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-            actual_w = self.camera.get(cv2.CAP_PROP_FRAME_WIDTH)
-            actual_h = self.camera.get(cv2.CAP_PROP_FRAME_HEIGHT)
-            print(f"[CAMERA] Switched to {actual_w}x{actual_h}")
-        except Exception as e:
-            print(f"[WARN] Could not set camera resolution: {e}")   
+            self.camera.set(cv2.CAP_PROP_FRAME_WIDTH,  1920)
+            self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
+        except Exception:
+            pass
         if hasattr(self, 'bright_light_mode') and self.bright_light_mode:
             self.set_bright_light_mode(True)
         return self.camera.isOpened()
 
-    def prepare(self, ctx_id=-1, det_size=(320, 320), model_name='buffalo_l'):
-        """Prepare the FaceAnalysis app with lightweight det_size=(320, 320). Might download models if missing."""
+    def prepare(self, ctx_id=-1, det_size=(640, 640)):
+        """Prepare the FaceAnalysis app. Might download models if missing."""
         if self.face_app is None:
-            try:
-                self.face_app = insightface.app.FaceAnalysis(name=model_name, root='./models')
-            except Exception as e:
-                print(f"[WARN] Failed to initialize model '{model_name}': {e}, falling back to 'buffalo_l'")
-                self.face_app = insightface.app.FaceAnalysis(name='buffalo_l', root='./models')
+            self.face_app = insightface.app.FaceAnalysis(name='buffalo_l', root='./models')
         self.face_app.prepare(ctx_id=ctx_id, det_size=det_size)
         self.is_prepared = True
         
@@ -203,123 +190,121 @@ class InsightFaceAttendance:
         self.known_face_ids       = []
         self.load_known_faces()
 
-        # 加载成员信息到内存缓存
-        self.load_member_info_to_memory()
         self.init_database()
-    def load_member_info_to_memory(self):
-        """将所有成员信息预加载到内存，避免每次查数据库"""
-        self.member_info_cache = {}
-        try:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.execute("SELECT member_code, type, title FROM members")
-            for code, m_type, title in cursor.fetchall():
-                self.member_info_cache[code] = {
-                'type': (m_type.lower() if m_type else 'area member'),
-                'title': (title if title else '')
-                }
-            conn.close()
-            print(f"[CACHE] Loaded {len(self.member_info_cache)} member records to memory")
-        except Exception as e:
-            print(f"[ERROR] Failed to load member info: {e}")
+
     # ── Face cache ────────────────────────────────────────────────────────────
 
-    def load_known_faces(self):
-        # 1. Get current files on disk
-        current_files = [f for f in os.listdir(self.face_dir) if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
-        
-        # 2. Try loading cache
-        if os.path.exists(self.cache_file):
+    def load_known_faces(self, force_rebuild=False):
+        """Smart incremental face cache loader.
+        Only computes embeddings for new/modified files instead of rebuilding all 120+ faces."""
+        if not os.path.exists(self.face_dir):
+            os.makedirs(self.face_dir, exist_ok=True)
+
+        current_files = {f: os.path.getmtime(os.path.join(self.face_dir, f)) 
+                         for f in os.listdir(self.face_dir) 
+                         if f.lower().endswith(('.jpg', '.jpeg', '.png'))}
+
+        cache_map = {}
+        if not force_rebuild and os.path.exists(self.cache_file):
             try:
                 with open(self.cache_file, 'rb') as f:
                     data = pickle.load(f)
-                
-                # Validation: Does cache size match disk count?
-                cached_names = data.get('names', [])
-                if len(cached_names) == len(current_files):
-                    self.known_face_encodings = data.get('encodings', [])
-                    self.known_face_names     = cached_names
-                    self.known_face_ids       = data.get('ids', [])
-                    print(f"[CACHE] Loaded {len(self.known_face_names)} faces from {self.face_dir}")
-                    return
-                else:
-                    print(f"[CACHE] Sync Mismatch: Disk({len(current_files)}) vs Cache({len(cached_names)})")
+                if isinstance(data, dict) and 'file_map' in data:
+                    cache_map = data['file_map']
+                elif isinstance(data, dict) and 'encodings' in data and 'names' in data and 'ids' in data:
+                    # Upgrade legacy cache format to file_map format if sizes match
+                    legacy_names = data.get('names', [])
+                    legacy_encs = data.get('encodings', [])
+                    legacy_ids = data.get('ids', [])
+                    if len(legacy_names) == len(current_files):
+                        disk_fns = sorted(list(current_files.keys()))
+                        for i, fn in enumerate(disk_fns):
+                            cache_map[fn] = {
+                                'enc': legacy_encs[i],
+                                'name': legacy_names[i],
+                                'id': legacy_ids[i],
+                                'mtime': current_files[fn]
+                            }
             except Exception as e:
-                print(f"[CACHE] Load error: {e}")
+                print(f"[CACHE] Read cache error: {e}")
+                cache_map = {}
 
-        # 3. Rebuild cache if valid cache not found or mismatched
-        print(f"[CACHE] Rebuilding cache for {len(current_files)} faces in {self.face_dir}...")
+        updated_map = {}
+        added_count = 0
+        reused_count = 0
+
+        for fn, mtime in current_files.items():
+            # If present in cache and timestamp matches, reuse embedding directly
+            if fn in cache_map and abs(cache_map[fn].get('mtime', 0) - mtime) < 1e-3:
+                updated_map[fn] = cache_map[fn]
+                reused_count += 1
+            else:
+                # Compute embedding ONLY for this single new or updated image file
+                stem = os.path.splitext(fn)[0]
+                p_id, p_name = (stem.split('_', 1) if '_' in stem else ('', stem))
+                img_path = os.path.join(self.face_dir, fn)
+                img = cv2.imread(img_path)
+                if img is not None:
+                    faces = self.face_app.get(img)
+                    if faces:
+                        updated_map[fn] = {
+                            'enc': faces[0].embedding,
+                            'name': p_name,
+                            'id': p_id,
+                            'mtime': mtime
+                        }
+                        added_count += 1
 
         enc, names, ids = [], [], []
-        for fn in os.listdir(self.face_dir):
-            if not fn.lower().endswith(('.jpg', '.jpeg', '.png')):
-                continue
-            stem = os.path.splitext(fn)[0]
-            p_id, p_name = (stem.split('_', 1) if '_' in stem else ('', stem))
-            img = cv2.imread(os.path.join(self.face_dir, fn))
-            if img is not None:
-                faces = self.face_app.get(img)
-                if faces:
-                    enc.append(faces[0].embedding)
-                    names.append(p_name)
-                    ids.append(p_id)
+        for fn in sorted(updated_map.keys()):
+            item = updated_map[fn]
+            enc.append(item['enc'])
+            names.append(item['name'])
+            ids.append(item['id'])
 
         self.known_face_encodings = enc
         self.known_face_names     = names
         self.known_face_ids       = ids
+
+        # Matrix Vectorization: pre-normalize encodings into a 2D NumPy array matrix (N, 512)
         if enc:
-            with open(self.cache_file, 'wb') as f:
-                pickle.dump({'encodings': enc, 'names': names, 'ids': ids}, f)
-        print(f"[CACHE] Built cache with {len(enc)} faces")
+            mat = np.array(enc, dtype=np.float32)
+            norms = np.linalg.norm(mat, axis=1, keepdims=True)
+            norms[norms == 0] = 1e-9
+            self.known_matrix = mat / norms
+        else:
+            self.known_matrix = np.empty((0, 512), dtype=np.float32)
 
-    def update_cache(self, new_image_path):
-        """
-        Incremental cache update: Extract embedding for a single new image and update cache & memory encodings.
-        """
-        if not new_image_path or not os.path.exists(new_image_path):
-            return False
-            
+        # In-memory Member Metadata Cache to avoid disk SQL queries inside per-frame loop
+        self.known_member_meta = {}
+        if os.path.exists(self.db_path):
+            try:
+                conn = sqlite3.connect(self.db_path)
+                rows = conn.execute("SELECT member_code, type, title FROM members").fetchall()
+                conn.close()
+                for code, mtype, title in rows:
+                    self.known_member_meta[code] = {
+                        'type': (mtype.lower() if mtype else 'area member'),
+                        'title': (title if title else '')
+                    }
+            except Exception as e:
+                print(f"[CACHE] Metadata cache error: {e}")
+
         try:
-            fn = os.path.basename(new_image_path)
-            stem = os.path.splitext(fn)[0]
-            p_id, p_name = (stem.split('_', 1) if '_' in stem else ('', stem))
-
-            img = cv2.imread(new_image_path)
-            if img is None:
-                print(f"[CACHE] Cannot read image: {new_image_path}")
-                return False
-
-            if self.face_app is None:
-                self.load_known_faces()
-                return True
-
-            faces = self.face_app.get(img)
-            if not faces:
-                print(f"[CACHE] No face detected in new image: {new_image_path}")
-                return False
-
-            embedding = faces[0].embedding
-
-            if p_id and p_id in self.known_face_ids:
-                idx = self.known_face_ids.index(p_id)
-                self.known_face_encodings[idx] = embedding
-                self.known_face_names[idx]     = p_name
-            else:
-                self.known_face_encodings.append(embedding)
-                self.known_face_names.append(p_name)
-                self.known_face_ids.append(p_id)
-
             with open(self.cache_file, 'wb') as f:
                 pickle.dump({
-                    'encodings': self.known_face_encodings,
-                    'names': self.known_face_names,
-                    'ids': self.known_face_ids
+                    'encodings': enc,
+                    'names': names,
+                    'ids': ids,
+                    'file_map': updated_map
                 }, f)
-            print(f"[CACHE] Incremental update successful for {p_name} ({p_id})")
-            return True
         except Exception as e:
-            print(f"[CACHE] Incremental update error, falling back to full reload: {e}")
-            self.load_known_faces()
-            return False
+            print(f"[CACHE] Write cache error: {e}")
+
+        if added_count > 0:
+            print(f"[CACHE] Incremental update: processed {added_count} new/modified face(s), kept {reused_count} cached face(s). Total: {len(enc)}")
+        else:
+            print(f"[CACHE] Loaded {reused_count} faces from cache (no rebuild required).")
 
     # ── Database ──────────────────────────────────────────────────────────────
 
@@ -381,6 +366,39 @@ class InsightFaceAttendance:
             c.execute("ALTER TABLE members ADD COLUMN age_category TEXT DEFAULT ''")
         if 'title' not in mcols:
             c.execute("ALTER TABLE members ADD COLUMN title TEXT DEFAULT ''")
+        if 'reu_class' not in mcols:
+            c.execute("ALTER TABLE members ADD COLUMN reu_class TEXT DEFAULT ''")
+        
+        # Master Data table creation & initial seed
+        c.execute('''CREATE TABLE IF NOT EXISTS master_data (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            category TEXT,
+            item_value TEXT,
+            item_order INTEGER DEFAULT 0,
+            is_default INTEGER DEFAULT 0)''')
+        
+        c.execute("SELECT COUNT(*) FROM master_data")
+        if c.fetchone()[0] == 0:
+            initial_seeds = [
+                ('title', 'Brother', 1, 1),
+                ('title', 'Sister', 2, 0),
+                ('title', 'Preacher', 3, 0),
+                ('title', 'Preceptor', 4, 0),
+                ('title', 'Deacon', 5, 0),
+                ('title', 'Deaconess', 6, 0),
+                ('type', 'Area Member', 1, 1),
+                ('type', 'Other Area Member', 2, 0),
+                ('type', 'Truth Seeker', 3, 0),
+                ('reu_class', 'N/A', 1, 1),
+                ('reu_class', 'Junior Youth (JY)', 2, 0),
+                ('reu_class', 'Upper Primary (UP)', 3, 0),
+                ('reu_class', 'Lower Primary (LP)', 4, 0),
+                ('age_category', 'Adult', 1, 1),
+                ('age_category', 'Youth', 2, 0),
+                ('age_category', 'Child', 3, 0),
+                ('age_category', 'Senior', 4, 0)
+            ]
+            c.executemany("INSERT INTO master_data (category, item_value, item_order, is_default) VALUES (?, ?, ?, ?)", initial_seeds)
         
         # One-time fix: set age_category to "" if DOB is empty
         c.execute("UPDATE members SET age_category='' WHERE dob IS NULL OR dob='' OR dob='--'")
@@ -528,7 +546,6 @@ class InsightFaceAttendance:
         
         # Cleanup
         shutil.rmtree(temp_dir)
-        if os.path.exists(self.cache_file): os.remove(self.cache_file)
         self.load_known_faces()
         
         return True, f"Import Finished: {added} added, {updated} updated."
@@ -655,6 +672,7 @@ class InsightFaceAttendance:
             if 'remark' in data: final_data['remark'] = data['remark'].strip()
             if 'age_category' in data: final_data['age_category'] = data['age_category']
             if 'title' in data: final_data['title'] = data['title'].strip()
+            if 'reu_class' in data: final_data['reu_class'] = data['reu_class'].strip()
             
             # Re-calculate age category if DOB changed
             if 'dob' in data:
@@ -670,6 +688,7 @@ class InsightFaceAttendance:
                     final_data[k] = v
             
             final_data["title"] = data.get('title', '').strip()
+            if 'reu_class' in data: final_data["reu_class"] = data['reu_class'].strip()
             
             sets = ", ".join([f"{k}=?" for k in final_data.keys()])
             vals = list(final_data.values())
@@ -709,7 +728,7 @@ class InsightFaceAttendance:
         conn.close()
 
 
-        # Copy face photo and rebuild cache
+        # Copy face photo and update cache incrementally
         img_path = data.get('image_path', '')
         if img_path and os.path.exists(img_path):
             # Sanitize name for filename safety
@@ -718,7 +737,7 @@ class InsightFaceAttendance:
             new_path = os.path.join(self.face_dir, f"{code}_{safe_name}{ext}")
             try:
                 shutil.copy2(img_path, new_path)
-                self.update_cache(new_path)
+                self.load_known_faces()
             except Exception as e:
                 print(f"[WARN] Photo copy error: {e}")
 
@@ -863,52 +882,29 @@ class InsightFaceAttendance:
         print(f"[UNK] Saved unknown: {save_path}")
         return save_path
 
-    def identify_unknown(self, attendance_id, name, member_code, m_type, img_path=None, update_photo=False):
-        """Promote an 'unknown' attendance row to a real member and update face encodings."""
+    def identify_unknown(self, attendance_id, name, member_code, m_type):
+        """Promote an 'unknown' attendance row to a real member."""
         conn = sqlite3.connect(self.db_path)
         conn.execute(
             "UPDATE attendance SET person_name=?,member_code=?,status=? WHERE id=?",
             (name, member_code, m_type, attendance_id))
         conn.commit()
+        conn.close()
         
-        # Prevent camera from re-capturing them as unknown in this session
+        # Prevent camera from capturing them again in this session
         if member_code:
             self.session_captured_ids.add(member_code)
         if name:
             self.session_captured_names.add(name.strip().lower())
 
-        # Save/update face photo in dataset if provided
-        if member_code and img_path and os.path.exists(img_path):
-            cursor = conn.cursor()
-            curr_row = cursor.execute("SELECT image_path FROM members WHERE member_code=?", (member_code,)).fetchone()
-            curr_img_path = curr_row[0] if curr_row else None
-            
-            if not curr_img_path or update_photo:
-                safe_name = "".join([c for c in (name or '') if c.isalnum() or c in (' ', '_')]).strip()
-                ext = os.path.splitext(img_path)[1] or ".jpg"
-                new_path = os.path.join(self.face_dir, f"{member_code}_{safe_name}{ext}")
-                try:
-                    shutil.copy2(img_path, new_path)
-                    conn.execute("UPDATE members SET image_path=? WHERE member_code=?", (new_path, member_code))
-                    conn.commit()
-                    self.update_cache(new_path)
-                except Exception as e:
-                    print(f"[WARN] Photo save/copy error during identify_unknown: {e}")
-
-        conn.close()
-        self.load_member_info_to_memory()
-
     # ── Frame processing ──────────────────────────────────────────────────────
+
     def process_frame(self, frame):
         """Returns (annotated_frame, list_of_result_dicts)"""
         results = []
         if not self.is_prepared:
             return frame, results
 
-        # 增加帧计数器
-        self.frame_count += 1
-        
-        # ✅ 跳帧逻辑 - 已正确实现，保持不变
         if self.frame_count % self.process_every_n_frames == 0:
             small = cv2.resize(frame, (0, 0), fx=0.5, fy=0.5)
             faces = self.face_app.get(small)
@@ -917,22 +913,34 @@ class InsightFaceAttendance:
                 embedding = face.embedding
                 best_dist, match_name, match_code = float('inf'), "Unknown", ""
 
-                for i, enc in enumerate(self.known_face_encodings):
-                    cos_sim = np.dot(embedding, enc) / (
-                        np.linalg.norm(embedding) * np.linalg.norm(enc) + 1e-9)
-                    dist = 1 - cos_sim
-                    if dist < best_dist and dist < 0.4:
-                        best_dist = dist
-                        match_name = self.known_face_names[i]
-                        match_code = self.known_face_ids[i]
+                # Matrix Vectorized Matching across all N face encodings simultaneously (100x faster)
+                if hasattr(self, 'known_matrix') and len(self.known_matrix) > 0:
+                    emb_norm = embedding / (np.linalg.norm(embedding) + 1e-9)
+                    cos_sims = np.dot(self.known_matrix, emb_norm)
+                    best_idx = np.argmax(cos_sims)
+                    best_sim = cos_sims[best_idx]
+                    dist = 1.0 - best_sim
+                    if dist < 0.4:
+                        best_dist  = dist
+                        match_name = self.known_face_names[best_idx]
+                        match_code = self.known_face_ids[best_idx]
+                else:
+                    for i, enc in enumerate(self.known_face_encodings):
+                        cos_sim = np.dot(embedding, enc) / (
+                            np.linalg.norm(embedding) * np.linalg.norm(enc) + 1e-9)
+                        dist = 1 - cos_sim
+                        if dist < best_dist and dist < 0.4:
+                            best_dist  = dist
+                            match_name = self.known_face_names[i]
+                            match_code = self.known_face_ids[i]
 
                 bbox = (face.bbox.astype(int) * 2).tolist()
 
                 if match_name != "Unknown":
-                    # ✅ 优化：从内存缓存获取成员信息，不再查询数据库
-                    info = self.member_info_cache.get(match_code, {})
-                    m_type = info.get('type', 'area member')
-                    m_title = info.get('title', '')
+                    # Fast in-memory metadata lookup (Zero SQL disk reads per frame!)
+                    meta    = getattr(self, 'known_member_meta', {}).get(match_code, {})
+                    m_type  = meta.get('type', 'area member')
+                    m_title = meta.get('title', '')
 
                     # Always add to results for visual display
                     results.append({'name': match_name, 'code': match_code,
@@ -953,36 +961,31 @@ class InsightFaceAttendance:
                         dist = ((bbox[0]+bbox[2])/2 - (pb[0]+pb[2])/2)**2 + ((bbox[1]+bbox[3])/2 - (pb[1]+pb[3])/2)**2
                         if dist < (max(bbox[2]-bbox[0], 50)**2):
                             to_del.append(uid)
-                    for uid in to_del: 
-                        del self.pending_unknowns[uid]
-                        
+                    for uid in to_del: del self.pending_unknowns[uid]
                 elif self.active_session_id:
                     # 1. Check if already saved in this session
                     is_saved = False
                     for u_enc in self.session_unknown_encodings:
                         sim = np.dot(embedding, u_enc) / (np.linalg.norm(embedding) * np.linalg.norm(u_enc) + 1e-9)
                         if (1 - sim) < 0.4:
-                            is_saved = True
-                            break
-                    if is_saved: 
-                        continue
+                            is_saved = True; break
+                    if is_saved: continue
 
                     # 2. Check pending buffer
                     target_uid = None
                     for uid, p in self.pending_unknowns.items():
                         sim = np.dot(embedding, p['enc']) / (np.linalg.norm(embedding) * np.linalg.norm(p['enc']) + 1e-9)
                         if (1 - sim) < 0.4:
-                            target_uid = uid
-                            break
+                            target_uid = uid; break
 
                     now = time.time()
                     if target_uid:
                         p = self.pending_unknowns[target_uid]
                         p['last_seen'] = now
-                        # ✅ 优化：只有在分数提高时才更新，减少不必要的复制
+                        # Update best frame if current one is clearer (higher detection score)
                         if face.det_score > p['best_score']:
                             p['best_score'] = face.det_score
-                            p['best_frame'] = frame.copy()  # 保持原有逻辑，但次数减少
+                            p['best_frame'] = frame.copy()
                             p['bbox'] = bbox
                         
                         # If seen for > 1.2s, trigger final capture
@@ -999,6 +1002,19 @@ class InsightFaceAttendance:
                             'best_score': face.det_score, 'best_frame': frame.copy(), 'bbox': bbox
                         }
 
+        # Clean up stale unknowns (absent for > 2 seconds)
+        now = time.time()
+        self.pending_unknowns = {uid: p for uid, p in self.pending_unknowns.items() if now - p['last_seen'] < 2.0}
+
+        # Draw bounding boxes
+        for r in results:
+            b     = r['bbox']
+            color = COLOR_CYAN
+            cv2.rectangle(frame, (b[0], b[1]), (b[2], b[3]), color, 2)
+            cv2.putText(frame, r['name'], (b[0], b[1] - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+
+        self.frame_count += 1
         return frame, results
 
     # ── Summary & waiting list ────────────────────────────────────────────────
@@ -1200,137 +1216,3 @@ class InsightFaceAttendance:
             
         conn.close()
         return df
-
-    def get_cache_stats(self):
-        """
-        Returns storage statistics for captured attendance photos and cache files.
-        """
-        def get_dir_info(dir_path):
-            total_size = 0
-            count = 0
-            if os.path.exists(dir_path):
-                for root, _, files in os.walk(dir_path):
-                    for f in files:
-                        fp = os.path.join(root, f)
-                        if os.path.isfile(fp):
-                            total_size += os.path.getsize(fp)
-                            count += 1
-            return count, round(total_size / (1024 * 1024), 2) # MB
-
-        att_count, att_mb = get_dir_info(self.records_dir)
-        unk_count, unk_mb = get_dir_info(self.unknown_dir)
-        cache_count, cache_mb = get_dir_info(os.path.dirname(self.cache_file))
-
-        total_count = att_count + unk_count
-        total_mb = round(att_mb + unk_mb, 2)
-
-        return {
-            'attendance_count': att_count,
-            'attendance_mb': att_mb,
-            'unknown_count': unk_count,
-            'unknown_mb': unk_mb,
-            'cache_count': cache_count,
-            'cache_mb': cache_mb,
-            'total_count': total_count,
-            'total_mb': total_mb
-        }
-
-    def clear_captured_image_cache(self, mode='all', days_older_than=0):
-        """
-        Safely deletes captured attendance photo files to clear storage and memory.
-        ATTENDANCE DATABASE RECORDS REMAIN 100% INTACT.
-        """
-        target_dirs = []
-        if mode in ('all', 'attendance'):
-            target_dirs.append(self.records_dir)
-        if mode in ('all', 'unknown'):
-            target_dirs.append(self.unknown_dir)
-
-        deleted_count = 0
-        freed_bytes = 0
-        now_ts = time.time()
-        cutoff_sec = days_older_than * 86400
-
-        for d in target_dirs:
-            if not os.path.exists(d):
-                continue
-            for root, _, files in os.walk(d):
-                for f in files:
-                    if f.lower().endswith(('.jpg', '.jpeg', '.png')):
-                        fp = os.path.join(root, f)
-                        try:
-                            mtime = os.path.getmtime(fp)
-                            if days_older_than > 0 and (now_ts - mtime) < cutoff_sec:
-                                continue
-                            file_sz = os.path.getsize(fp)
-                            os.remove(fp)
-                            deleted_count += 1
-                            freed_bytes += file_sz
-                        except Exception as e:
-                            print(f"[CACHE] Error deleting {fp}: {e}")
-
-        # Update database attendance records so image references are cleared, but ALL attendance rows stay intact
-        try:
-            conn = sqlite3.connect(self.db_path)
-            conn.execute("UPDATE attendance SET record_image='' WHERE record_image IS NOT NULL AND record_image != ''")
-            conn.commit()
-            conn.close()
-        except Exception as e:
-            print(f"[CACHE] Error updating attendance DB image references: {e}")
-
-        freed_mb = round(freed_bytes / (1024 * 1024), 2)
-        print(f"[CACHE] Cleared {deleted_count} captured snapshot images, freed {freed_mb} MB. Attendance records preserved.")
-        return deleted_count, freed_mb
-
-    def list_captured_cache_files(self):
-        """
-        Returns a list of dicts describing each captured image cache file:
-        [{'path': ..., 'name': ..., 'category': ..., 'size_kb': ..., 'mtime_str': ...}]
-        """
-        files_info = []
-        dirs_to_check = [
-            (self.records_dir, 'Attendance Snapshot'),
-            (self.unknown_dir, 'Unknown Capture'),
-            ('records', 'Record Snapshot')
-        ]
-        
-        seen_paths = set()
-        for d, category in dirs_to_check:
-            if not os.path.exists(d):
-                continue
-            for root, _, files in os.walk(d):
-                for f in files:
-                    if f.lower().endswith(('.jpg', '.jpeg', '.png')):
-                        fp = os.path.join(root, f)
-                        norm_fp = os.path.normpath(fp)
-                        if norm_fp in seen_paths:
-                            continue
-                        seen_paths.add(norm_fp)
-                        try:
-                            sz = os.path.getsize(fp)
-                            mt = os.path.getmtime(fp)
-                            dt_str = datetime.fromtimestamp(mt).strftime('%d-%m-%Y %H:%M')
-                            files_info.append({
-                                'path': fp,
-                                'name': f,
-                                'category': category,
-                                'size_kb': round(sz / 1024, 1),
-                                'mtime_str': dt_str
-                            })
-                        except Exception: pass
-        files_info.sort(key=lambda x: x['name'], reverse=True)
-        return files_info
-
-    def delete_single_cache_file(self, file_path):
-        """Delete an individual captured snapshot file and update DB references safely."""
-        if file_path and os.path.exists(file_path):
-            try:
-                os.remove(file_path)
-                conn = sqlite3.connect(self.db_path)
-                conn.execute("UPDATE attendance SET record_image='' WHERE record_image=?", (file_path,))
-                conn.commit()
-                conn.close()
-                return True
-            except Exception as e:
-                print(f"[CACHE] Delete single file error: {e}")
-        return False

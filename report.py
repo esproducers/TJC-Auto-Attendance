@@ -71,19 +71,6 @@ class ReportGenerator:
             "Area Total": area_total,
             "Total Sys Members": total_sys_m
         }
-    def create_indexes(self):
-        """创建数据库索引以加速查询"""
-        try:
-            conn = sqlite3.connect(self.db_path)
-            c = conn.cursor()
-            c.execute("CREATE INDEX IF NOT EXISTS idx_session ON attendance(session_id)")
-            c.execute("CREATE INDEX IF NOT EXISTS idx_time ON attendance(check_in_time)")
-            c.execute("CREATE INDEX IF NOT EXISTS idx_member_code ON attendance(member_code)")
-            conn.commit()
-            conn.close()
-            print("[DB] Indexes created successfully")
-        except Exception as e:
-            print(f"[DB] Error creating indexes: {e}")
 
     def generate_excel(self, session_ids=None, out_path=None, summary=False, default_area=None):
         if isinstance(session_ids, int):
@@ -796,6 +783,90 @@ class ReportGenerator:
         out_path = df_path.replace(".xlsx", ".pdf")
         pdf.output(out_path)
         return out_path
+
+    def generate_reu_excel(self, reu_class=None, from_date=None, to_date=None, out_path=None):
+        conn = sqlite3.connect(self.db_path)
+        where_clauses = ["1=1"]
+        params = []
+        if reu_class and reu_class != "All REU":
+            where_clauses.append("COALESCE(m.reu_class, '') = ?")
+            params.append(reu_class)
+        else:
+            where_clauses.append("COALESCE(m.reu_class, '') != '' AND COALESCE(m.reu_class, '') != 'N/A'")
+            
+        if from_date:
+            where_clauses.append("a.service_date >= ?")
+            params.append(from_date)
+        if to_date:
+            where_clauses.append("a.service_date <= ?")
+            params.append(to_date)
+            
+        where_str = " AND ".join(where_clauses)
+        query = f"""
+            SELECT a.service_date AS 'Service Date',
+                   s.title AS 'Session Name',
+                   COALESCE(m.member_code, a.member_code) AS 'Member Code',
+                   COALESCE(m.name, a.person_name) AS 'Child Name',
+                   COALESCE(m.title, '') AS 'Title',
+                   COALESCE(m.reu_class, 'N/A') AS 'REU Class',
+                   COALESCE(m.type, a.status) AS 'Type',
+                   COALESCE(m.age_category, '') AS 'Age Category',
+                   COALESCE(m.dob, '') AS 'Date of Birth',
+                   COALESCE(m.phone, '') AS 'Parent Phone',
+                   a.check_in_time AS 'Check-In Time'
+            FROM attendance a
+            LEFT JOIN members m ON a.member_code = m.member_code
+            LEFT JOIN sessions s ON a.session_id = s.id
+            WHERE {where_str}
+            ORDER BY a.service_date DESC, a.check_in_time ASC
+        """
+        df = pd.read_sql(query, conn, params=params)
+        conn.close()
+        
+        filename = out_path if out_path else f"reports/REU_Report_{date.today()}.xlsx"
+        df.to_excel(filename, index=False)
+        return filename
+
+    def generate_reu_pdf(self, reu_class=None, from_date=None, to_date=None, out_path=None, settings=None):
+        settings = settings or self.settings
+        excel_path = self.generate_reu_excel(reu_class, from_date, to_date, out_path=out_path.replace('.pdf', '.xlsx') if out_path else None)
+        df = pd.read_excel(excel_path)
+        
+        pdf = FPDF('L', 'mm', 'A4')
+        pdf.add_page()
+        self._add_standard_header(pdf, settings)
+        
+        pdf.set_font("Arial", 'B', 16)
+        title_text = f"REU ATTENDANCE REPORT ({reu_class if reu_class else 'ALL REU CLASSES'})"
+        pdf.cell(0, 10, title_text, ln=True, align='C')
+        pdf.set_font("Arial", 'I', 10)
+        pdf.cell(0, 7, f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", ln=True, align='C')
+        pdf.ln(5)
+
+        # Header Table
+        pdf.set_fill_color(240, 240, 240)
+        pdf.set_font("Arial", 'B', 10)
+        cols = ["Date", "Session Name", "ID", "Child Name", "REU Class", "Parent Phone", "Check-In"]
+        widths = [30, 55, 30, 55, 45, 35, 25]
+        for i, c in enumerate(cols):
+            pdf.cell(widths[i], 10, c, border=1, fill=True, align='C')
+        pdf.ln()
+
+        # Data Rows
+        pdf.set_font("Arial", '', 9)
+        for _, r in df.iterrows():
+            pdf.cell(widths[0], 8, str(r.get('Service Date', '')), border=1, align='C')
+            pdf.cell(widths[1], 8, str(r.get('Session Name', ''))[:30], border=1)
+            pdf.cell(widths[2], 8, str(r.get('Member Code', '')), border=1, align='C')
+            pdf.cell(widths[3], 8, str(r.get('Child Name', ''))[:30], border=1)
+            pdf.cell(widths[4], 8, str(r.get('REU Class', '')), border=1, align='C')
+            pdf.cell(widths[5], 8, str(r.get('Parent Phone', '')), border=1, align='C')
+            pdf.cell(widths[6], 8, str(r.get('Check-In Time', ''))[11:16], border=1, align='C')
+            pdf.ln()
+
+        filename = out_path if out_path else f"reports/REU_Report_{date.today()}.pdf"
+        pdf.output(filename)
+        return filename
 
     def generate_individual_period_report(self, period_str, period_type, seminar_filter, default_area, kind):
         """Generates a detailed report for every session within a specific period (e.g. Feb 2026)."""

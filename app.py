@@ -4,8 +4,6 @@ import socket
 import ipaddress
 import shutil
 import uuid
-import warnings
-warnings.filterwarnings("ignore", category=FutureWarning)
 from tkcalendar import DateEntry
 
 # --- CONFIDENTIAL DATA FIREWALL (BLOCKS ALL NETWORK TRAFFIC EXCEPT LOCAL LAN) ---
@@ -445,10 +443,6 @@ class AutoAttendanceApp(ctk.CTk):
         self.backend.set_bright_light_params(bright_params)
         self.backend.init_database() # Ensure DB is migrated before UI queries it
         self.reporter = ReportGenerator()
-        try:
-            self.reporter.create_indexes()
-        except Exception as e:
-            print(f"[DB] Index creation skipped/error: {e}")
         
         self.after(500, self.initialize_face_engine)
 
@@ -499,8 +493,11 @@ class AutoAttendanceApp(ctk.CTk):
         self.init_reports_page()
         self.init_org_chart_page()
         self.init_sql_page()
+        self.init_image_cache_page()
         self.init_settings_page()
         self.init_annually_report_page()
+        self.init_reu_report_page()
+        self.init_master_data_page()
         self.check_auto_periodical_reports()
 
 
@@ -508,19 +505,8 @@ class AutoAttendanceApp(ctk.CTk):
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
         self.update_camera()
 
-    def add_member_async(self, data, force_code=None, prefix="", callback=None):
-        """Asynchronously register/update a member and extract face encoding to avoid UI freeze."""
-        def task():
-            try:
-                code = self.backend.register_member(data, force_code=force_code, prefix=prefix)
-                if callback:
-                    self.after(0, lambda: callback(True, code, None))
-            except Exception as e:
-                print(f"[ERROR] add_member_async failed: {e}")
-                if callback:
-                    self.after(0, lambda: callback(False, None, str(e)))
-
-        threading.Thread(target=task, daemon=True).start()
+        # Update README with admin info
+        self._update_readme_admin()
 
     def initialize_face_engine(self):
         """Attempts to load AI models, asking for temporary internet access if they are missing."""
@@ -574,7 +560,9 @@ class AutoAttendanceApp(ctk.CTk):
         if hasattr(self, 'backend') and self.backend and self.backend.camera:
             self.backend.camera.release()
         self.destroy()
+
     # ── Settings ──────────────────────────────────────────────────────────────
+
     def load_settings(self):
         try:
             with open("settings.json") as f:
@@ -661,8 +649,10 @@ class AutoAttendanceApp(ctk.CTk):
         nav = [("🏠  Dashboard", "dashboard"), ("👥  Members", "members"),
                ("📜  Attendance Logs", "logs"), ("📊  Reports", "reports"),
                ("📅  Annually Report", "annually_report"),
+               ("🏫  REU Report", "reu_report"),
                ("📊  Organization chart", "org_chart"),
-               ("🖼️  Image Cache", "cache_manager"),
+               ("🖼  Image Cache", "image_cache"),
+               ("🗂  Master Data", "master_data"),
                ("⚙  Settings", "settings"),
                ("🗄  SQL Data", "sql")]
         self.nav_buttons = {}
@@ -676,8 +666,6 @@ class AutoAttendanceApp(ctk.CTk):
         btn.pack(pady=3, padx=12, fill="x")
         self.nav_buttons[key] = btn
 
-
-        
         # Pack the rest of the navigation buttons
         for text, key in nav[1:]:
             btn = ctk.CTkButton(self.nav_scroll, text=text, font=("Arial", 13), height=44,
@@ -694,7 +682,7 @@ class AutoAttendanceApp(ctk.CTk):
 
     def refresh_sidebar_visibility(self):
         # Hide restricted buttons for public
-        restricted = ["reports", "annually_report", "org_chart", "settings", "sql"]
+        restricted = ["reports", "annually_report", "reu_report", "org_chart", "image_cache", "master_data", "settings", "sql"]
         for key in restricted:
             if key in self.nav_buttons:
                 if self.is_admin:
@@ -1098,12 +1086,8 @@ class AutoAttendanceApp(ctk.CTk):
         ctk.CTkButton(r_dialog, text="Reset & Login", width=260, height=35, command=reset).pack()
 
     def show_frame(self, page_id):
-        if page_id == "cache_manager":
-            self.show_image_cache_popup()
-            return
-
         # Restriction check
-        restricted = ["reports", "annually_report", "org_chart", "cache_manager", "settings", "sql"]
+        restricted = ["reports", "annually_report", "reu_report", "org_chart", "image_cache", "master_data", "settings", "sql"]
         if page_id in restricted and not self.is_admin:
             messagebox.showwarning("Restricted", "Admin login required to access this page.")
             return
@@ -1121,144 +1105,24 @@ class AutoAttendanceApp(ctk.CTk):
                 else:
                     btn.configure(fg_color="transparent", text_color="#333")
 
-    def show_image_cache_popup(self):
-        popup = ctk.CTkToplevel(self)
-        popup.title("Captured Image Cache Manager")
-        popup.geometry("640x680")
-        popup.attributes("-topmost", True)
-        popup.grab_set()
+            if page_id == "image_cache":
+                self.refresh_image_cache_page()
+            elif page_id == "master_data":
+                self.refresh_master_data_page()
+            elif page_id == "reu_report":
+                self.refresh_reu_report_page()
 
-        ctk.CTkLabel(popup, text="🖼️  Captured Photo Storage & Cache",
-                     font=("Arial", 16, "bold")).pack(pady=(16, 8))
-
-        # Reassurance banner
-        banner = ctk.CTkFrame(popup, fg_color="#D1E7DD", border_width=1, border_color="#A3CFBB", corner_radius=8)
-        banner.pack(fill="x", padx=20, pady=4)
-        ctk.CTkLabel(banner, text="🛡️ SAFE CLEAN GUARANTEE: Deleting captured photo cache removes image files from disk to keep memory light.\nALL attendance check-in records, member data, and statistics remain 100% intact!",
-                     font=("Arial", 10, "bold"), text_color="#0F5132", justify="center").pack(padx=10, pady=8)
-
-        # Stats Container
-        stats_frame = ctk.CTkFrame(popup, fg_color="#F8F9FA", corner_radius=10)
-        stats_frame.pack(fill="x", padx=20, pady=10)
-
-        stats_inner = ctk.CTkFrame(stats_frame, fg_color="transparent")
-        stats_inner.pack(fill="x", padx=15, pady=10)
-
-        att_lbl = ctk.CTkLabel(stats_inner, text="📁 Attendance: 0 files (0 MB)", font=("Arial", 11))
-        att_lbl.pack(side="left", expand=True)
-
-        unk_lbl = ctk.CTkLabel(stats_inner, text="❓ Unknowns: 0 files (0 MB)", font=("Arial", 11))
-        unk_lbl.pack(side="left", expand=True)
-
-        total_lbl = ctk.CTkLabel(stats_inner, text="📦 Total: 0 files (0 MB)", font=("Arial", 12, "bold"), text_color="#0D6EFD")
-        total_lbl.pack(side="left", expand=True)
-
-        # Action Buttons Row
-        act_row = ctk.CTkFrame(popup, fg_color="transparent")
-        act_row.pack(fill="x", padx=20, pady=(0, 10))
-
-        ctk.CTkButton(act_row, text="🧹 Clear All Cache", font=("Arial", 11, "bold"),
-                       fg_color="#DC3545", hover_color="#BB2D3B", text_color="white", height=32,
-                       command=lambda: do_clear_all()).pack(side="left", padx=3)
-
-        ctk.CTkButton(act_row, text="🗑️ Clear Unknowns", font=("Arial", 11),
-                       fg_color="#FFC107", text_color="black", hover_color="#FFCA2C", height=32,
-                       command=lambda: do_clear_unknown()).pack(side="left", padx=3)
-
-        ctk.CTkButton(act_row, text="📅 > 30 Days", font=("Arial", 11),
-                       fg_color="#6C757D", text_color="white", hover_color="#5C636A", height=32,
-                       command=lambda: do_clear_older_30()).pack(side="left", padx=3)
-
-        ctk.CTkButton(act_row, text="🔄 Refresh", font=("Arial", 11),
-                       fg_color="#0D6EFD", text_color="white", hover_color="#0B5ED7", height=32,
-                       command=lambda: refresh_all()).pack(side="left", padx=3)
-
-        # Scrollable Files View Header
-        ctk.CTkLabel(popup, text="Cached Image Files:", font=("Arial", 12, "bold"), anchor="w").pack(fill="x", padx=20, pady=(5, 2))
-
-        files_scroll = ctk.CTkScrollableFrame(popup, fg_color="#F8F9FA", corner_radius=10, height=320)
-        files_scroll.pack(fill="both", expand=True, padx=20, pady=(0, 15))
-
-        def refresh_all():
-            for w in files_scroll.winfo_children():
-                w.destroy()
-
-            stats = self.backend.get_cache_stats()
-            att_lbl.configure(text=f"📁 Attendance: {stats['attendance_count']} files ({stats['attendance_mb']} MB)")
-            unk_lbl.configure(text=f"❓ Unknowns: {stats['unknown_count']} files ({stats['unknown_mb']} MB)")
-            total_lbl.configure(text=f"📦 Total Cache: {stats['total_count']} files ({stats['total_mb']} MB)")
-
-            file_list = self.backend.list_captured_cache_files()
-            if not file_list:
-                ctk.CTkLabel(files_scroll, text="✨ No captured image files found in cache folders.\n(Your image cache is clean!)",
-                             font=("Arial", 12), text_color="gray").pack(pady=40)
-                return
-
-            for fi in file_list:
-                f_path = fi['path']
-                f_name = fi['name']
-                f_cat = fi['category']
-                f_size = fi['size_kb']
-                f_date = fi['mtime_str']
-
-                row = ctk.CTkFrame(files_scroll, fg_color="#FFFFFF", corner_radius=6, height=46, border_width=1, border_color="#E5E7EB")
-                row.pack(fill="x", pady=2, padx=2)
-                row.pack_propagate(False)
-
-                # Thumbnail preview icon
-                img_f = ctk.CTkFrame(row, width=34, height=34, fg_color="transparent")
-                img_f.pack(side="left", padx=6, pady=4)
-                img_f.pack_propagate(False)
-                img_lbl = ctk.CTkLabel(img_f, text="📷", font=("Arial", 12))
-                img_lbl.pack(expand=True)
-
-                if os.path.exists(f_path):
-                    try:
-                        pil = Image.open(f_path).resize((30, 30))
-                        ci = ctk.CTkImage(light_image=pil, dark_image=pil, size=(30, 30))
-                        img_lbl.configure(image=ci, text="")
-                    except: pass
-
-                info_f = ctk.CTkFrame(row, fg_color="transparent")
-                info_f.pack(side="left", fill="both", expand=True, padx=4)
-
-                cat_color = "#28A745" if "Attendance" in f_cat else "#F59E0B"
-                ctk.CTkLabel(info_f, text=f"{f_name}", font=("Arial", 10, "bold"), anchor="w").pack(pady=(4, 0), fill="x")
-                ctk.CTkLabel(info_f, text=f"[{f_cat}] • {f_size} KB • {f_date}", font=("Arial", 9), text_color=cat_color, anchor="w").pack(fill="x")
-
-                # Single File Delete
-                def del_file(fp=f_path):
-                    if self.backend.delete_single_cache_file(fp):
-                        refresh_all()
-
-                ctk.CTkButton(row, text="🗑️", width=28, height=28, font=("Arial", 10),
-                               fg_color="transparent", text_color="#DC3545", hover_color="#FEE2E2",
-                               command=del_file).pack(side="right", padx=6)
-
-        def do_clear_all():
-            if messagebox.askyesno("Confirm Clear All Cache",
-                                   "Are you sure you want to delete all captured attendance snapshot images?\n\n"
-                                   "• Physical image files will be removed from disk.\n"
-                                   "• Attendance check-in logs & stats will NOT be deleted.", parent=popup):
-                count, mb = self.backend.clear_captured_image_cache(mode='all')
-                refresh_all()
-                messagebox.showinfo("Cache Cleared", f"Successfully deleted {count} photo files and freed {mb} MB!\nAttendance logs were preserved.", parent=popup)
-
-        def do_clear_unknown():
-            if messagebox.askyesno("Confirm Clear Unknowns",
-                                   "Delete only captured unknown face photos from disk?", parent=popup):
-                count, mb = self.backend.clear_captured_image_cache(mode='unknown')
-                refresh_all()
-                messagebox.showinfo("Cache Cleared", f"Successfully deleted {count} unknown photo files ({mb} MB).", parent=popup)
-
-        def do_clear_older_30():
-            if messagebox.askyesno("Confirm Selective Clear",
-                                   "Delete captured photo files older than 30 days?", parent=popup):
-                count, mb = self.backend.clear_captured_image_cache(mode='all', days_older_than=30)
-                refresh_all()
-                messagebox.showinfo("Cache Cleared", f"Deleted {count} photos older than 30 days ({mb} MB freed).", parent=popup)
-
-        refresh_all()
+    def get_master_options(self, category, default_list=None):
+        if default_list is None:
+            default_list = []
+        try:
+            conn = sqlite3.connect("database/attendance.db")
+            rows = conn.execute("SELECT item_value FROM master_data WHERE category=? ORDER BY item_order ASC, id ASC", (category,)).fetchall()
+            conn.close()
+            vals = [r[0] for r in rows if r[0]]
+            return vals if vals else default_list
+        except Exception:
+            return default_list
 
     def _display_logo(self, master):
         lp = self.settings.get("logo_path", "")
@@ -3298,6 +3162,495 @@ class AutoAttendanceApp(ctk.CTk):
             conn.close()
             return
 
+    # ── Image Cache Management Page ───────────────────────────────────────────
+
+    def init_image_cache_page(self):
+        f = ctk.CTkFrame(self.container, fg_color="#F8F9FA", corner_radius=10)
+        self.frames["image_cache"] = f
+
+        # Top Header Bar
+        hdr = ctk.CTkFrame(f, fg_color="transparent")
+        hdr.pack(fill="x", padx=20, pady=(15, 10))
+
+        ctk.CTkLabel(hdr, text="🖼️ Captured Image Cache Manager", font=("Arial", 22, "bold"),
+                     text_color="#1F2937").pack(side="left")
+
+        ref_btn = ctk.CTkButton(hdr, text="🔄 Refresh Cache List", font=("Arial", 12, "bold"),
+                                fg_color="#4B5563", hover_color="#374151", width=150, height=34,
+                                command=self.refresh_image_cache_page)
+        ref_btn.pack(side="right")
+        Tooltip(ref_btn, "Scan disk for cached captured images in records/attendance and records/unknown")
+
+        # Notice Banner (Safe Disk Space Management Description on Top)
+        notice_f = ctk.CTkFrame(f, fg_color="#EFF6FF", border_width=1, border_color="#BFDBFE", corner_radius=8)
+        notice_f.pack(fill="x", padx=20, pady=(0, 12))
+
+        ctk.CTkLabel(notice_f, text="🛡️ Safe Disk Space Management:", font=("Arial", 12, "bold"), text_color="#1E40AF").pack(side="left", padx=(12, 6), pady=10)
+        ctk.CTkLabel(notice_f, text="Deleting cached photos removes physical .jpg files from disk to prevent disk space buildup, while all database attendance records remain 100% untouched.",
+                     font=("Arial", 12), text_color="#1E3A8A", anchor="w").pack(side="left", pady=10)
+
+        # Summary Cards Container (Attendance & Unknown)
+        cards_f = ctk.CTkFrame(f, fg_color="transparent")
+        cards_f.pack(fill="x", padx=20, pady=(0, 15))
+        cards_f.grid_columnconfigure(0, weight=1)
+        cards_f.grid_columnconfigure(1, weight=1)
+
+        # Card 1: Attendance Images Cache
+        c1 = ctk.CTkFrame(cards_f, fg_color="#FFFFFF", corner_radius=8, border_width=1, border_color="#E5E7EB")
+        c1.grid(row=0, column=0, sticky="nsew", padx=(0, 10), pady=5)
+
+        c1_hdr = ctk.CTkFrame(c1, fg_color="transparent")
+        c1_hdr.pack(fill="x", padx=15, pady=(12, 4))
+        ctk.CTkLabel(c1_hdr, text="📸 Attendance Images Cache (records/attendance)", font=("Arial", 13, "bold"), text_color="#1E3A8A").pack(side="left")
+
+        self.att_cache_stat_lbl = ctk.CTkLabel(c1, text="Calculating...", font=("Arial", 12), text_color="#4B5563", anchor="w")
+        self.att_cache_stat_lbl.pack(fill="x", padx=15, pady=2)
+
+        c1_btn_f = ctk.CTkFrame(c1, fg_color="transparent")
+        c1_btn_f.pack(fill="x", padx=15, pady=(8, 12))
+
+        del_att_btn = ctk.CTkButton(c1_btn_f, text="🗑️ Clear All Attendance Image Cache", font=("Arial", 11, "bold"),
+                                    fg_color="#DC2626", hover_color="#B91C1C", height=32,
+                                    command=lambda: self.clear_folder_image_cache("attendance"))
+        del_att_btn.pack(side="left")
+        Tooltip(del_att_btn, "Delete all saved attendance face images in records/attendance folder.\nAttendance records in database will remain 100% intact.")
+
+        # Card 2: Unknown Captures Cache
+        c2 = ctk.CTkFrame(cards_f, fg_color="#FFFFFF", corner_radius=8, border_width=1, border_color="#E5E7EB")
+        c2.grid(row=0, column=1, sticky="nsew", padx=(10, 0), pady=5)
+
+        c2_hdr = ctk.CTkFrame(c2, fg_color="transparent")
+        c2_hdr.pack(fill="x", padx=15, pady=(12, 4))
+        ctk.CTkLabel(c2_hdr, text="❓ Unknown Captures Cache (records/unknown)", font=("Arial", 13, "bold"), text_color="#92400E").pack(side="left")
+
+        self.unk_cache_stat_lbl = ctk.CTkLabel(c2, text="Calculating...", font=("Arial", 12), text_color="#4B5563", anchor="w")
+        self.unk_cache_stat_lbl.pack(fill="x", padx=15, pady=2)
+
+        c2_btn_f = ctk.CTkFrame(c2, fg_color="transparent")
+        c2_btn_f.pack(fill="x", padx=15, pady=(8, 12))
+
+        del_unk_btn = ctk.CTkButton(c2_btn_f, text="🗑️ Clear All Unknown Captures Cache", font=("Arial", 11, "bold"),
+                                    fg_color="#DC2626", hover_color="#B91C1C", height=32,
+                                    command=lambda: self.clear_folder_image_cache("unknown"))
+        del_unk_btn.pack(side="left")
+        Tooltip(del_unk_btn, "Delete all saved unrecognised face images in records/unknown folder.\nAttendance records in database will remain 100% intact.")
+
+        # Filter & Search Control Row
+        ctrl_f = ctk.CTkFrame(f, fg_color="#FFFFFF", corner_radius=8, border_width=1, border_color="#E5E7EB")
+        ctrl_f.pack(fill="x", padx=20, pady=(0, 10))
+
+        # View Mode Segmented Button
+        ctk.CTkLabel(ctrl_f, text="View Mode:", font=("Arial", 12, "bold")).pack(side="left", padx=(15, 5), pady=10)
+        self.cache_view_mode_var = ctk.StringVar(value="📁 By Date Folders")
+        self.cache_view_mode_seg = ctk.CTkSegmentedButton(ctrl_f, variable=self.cache_view_mode_var,
+                                                          values=["📁 By Date Folders", "🖼️ Flat Image List"],
+                                                          command=lambda _: self.render_image_cache_list())
+        self.cache_view_mode_seg.pack(side="left", padx=5)
+
+        ctk.CTkLabel(ctrl_f, text="Category:", font=("Arial", 12, "bold")).pack(side="left", padx=(12, 5))
+        self.cache_filter_var = ctk.StringVar(value="All Folders")
+        self.cache_filter_cb = ctk.CTkComboBox(ctrl_f, variable=self.cache_filter_var,
+                                               values=["All Folders", "records/attendance", "records/unknown"],
+                                               width=160, command=lambda _: self.render_image_cache_list())
+        self.cache_filter_cb.pack(side="left", padx=5)
+
+        ctk.CTkLabel(ctrl_f, text="Date:", font=("Arial", 12, "bold")).pack(side="left", padx=(12, 5))
+        self.cache_date_filter_var = ctk.StringVar(value="All Dates")
+        self.cache_date_filter_cb = ctk.CTkComboBox(ctrl_f, variable=self.cache_date_filter_var,
+                                                    values=["All Dates"],
+                                                    width=135, command=lambda _: self.render_image_cache_list())
+        self.cache_date_filter_cb.pack(side="left", padx=5)
+
+        ctk.CTkLabel(ctrl_f, text="Search:", font=("Arial", 12, "bold")).pack(side="left", padx=(12, 5))
+        self.cache_search_e = ctk.CTkEntry(ctrl_f, width=150, placeholder_text="e.g. SK-0058")
+        self.cache_search_e.pack(side="left", padx=5)
+        self.cache_search_e.bind("<KeyRelease>", lambda _: self.render_image_cache_list())
+
+        # Main Scrollable Image List Area
+        self.cache_list_scroll = ctk.CTkScrollableFrame(f, fg_color="#FFFFFF", corner_radius=8, border_width=1, border_color="#E5E7EB")
+        self.cache_list_scroll.pack(fill="both", expand=True, padx=20, pady=(0, 20))
+
+        self.cached_image_files = []
+
+    def refresh_image_cache_page(self):
+        """Scans records/attendance and records/unknown for cached images, grouping them by date folders."""
+        att_dir = os.path.join("records", "attendance")
+        unk_dir = os.path.join("records", "unknown")
+
+        self.cached_image_files = []
+
+        def scan_folder(folder_path, category):
+            count, total_bytes = 0, 0
+            if os.path.exists(folder_path):
+                for root, dirs, files in os.walk(folder_path):
+                    for file in files:
+                        if file.lower().endswith(('.jpg', '.jpeg', '.png')):
+                            full_p = os.path.join(root, file)
+                            try:
+                                sz = os.path.getsize(full_p)
+                                mtime = os.path.getmtime(full_p)
+                                rel_dir = os.path.relpath(root, "records")
+                                parent_name = os.path.basename(root)
+
+                                # Extract date string YYYY-MM-DD
+                                if len(parent_name) == 10 and parent_name.count('-') == 2:
+                                    date_str = parent_name
+                                else:
+                                    date_str = datetime.fromtimestamp(mtime).strftime('%Y-%m-%d')
+
+                                self.cached_image_files.append({
+                                    'path': full_p,
+                                    'filename': file,
+                                    'category': category,
+                                    'folder': rel_dir,
+                                    'date': date_str,
+                                    'size': sz,
+                                    'mtime': mtime
+                                })
+                                count += 1
+                                total_bytes += sz
+                            except Exception:
+                                pass
+            return count, total_bytes
+
+        att_count, att_bytes = scan_folder(att_dir, "Attendance")
+        unk_count, unk_bytes = scan_folder(unk_dir, "Unknown")
+
+        att_mb = att_bytes / (1024 * 1024)
+        unk_mb = unk_bytes / (1024 * 1024)
+
+        if hasattr(self, 'att_cache_stat_lbl'):
+            self.att_cache_stat_lbl.configure(text=f"Total: {att_count} image(s) ({att_mb:.2f} MB)")
+        if hasattr(self, 'unk_cache_stat_lbl'):
+            self.unk_cache_stat_lbl.configure(text=f"Total: {unk_count} image(s) ({unk_mb:.2f} MB)")
+
+        self.cached_image_files.sort(key=lambda x: x['mtime'], reverse=True)
+
+        # Update date values in Date filter combobox
+        unique_dates = sorted(list(set(x['date'] for x in self.cached_image_files)), reverse=True)
+        if hasattr(self, 'cache_date_filter_cb'):
+            date_options = ["All Dates"] + unique_dates
+            self.cache_date_filter_cb.configure(values=date_options)
+
+        self.render_image_cache_list()
+
+    def render_image_cache_list(self):
+        for w in self.cache_list_scroll.winfo_children():
+            w.destroy()
+
+        filt_folder = self.cache_filter_var.get()
+        filt_date = getattr(self, 'cache_date_filter_cb', None)
+        selected_date = filt_date.get() if filt_date else "All Dates"
+        search_kw = self.cache_search_e.get().strip().lower()
+        view_mode = getattr(self, 'cache_view_mode_var', None)
+        mode = view_mode.get() if view_mode else "📁 By Date Folders"
+
+        filtered = []
+        for item in self.cached_image_files:
+            if filt_folder == "records/attendance" and item['category'] != "Attendance":
+                continue
+            if filt_folder == "records/unknown" and item['category'] != "Unknown":
+                continue
+            if selected_date != "All Dates" and item['date'] != selected_date:
+                continue
+            if search_kw and search_kw not in item['filename'].lower() and search_kw not in item['folder'].lower() and search_kw not in item['date']:
+                continue
+            filtered.append(item)
+
+        if not filtered:
+            ctk.CTkLabel(self.cache_list_scroll, text="No cached images found for selected filters.",
+                         font=("Arial", 13), text_color="gray").pack(pady=30)
+            return
+
+        if mode == "🖼️ Flat Image List":
+            self._render_flat_image_list(filtered)
+        else:
+            self._render_date_folders_view(filtered)
+
+    def _render_date_folders_view(self, items):
+        # Group items by date string
+        by_date = {}
+        for item in items:
+            d = item['date']
+            if d not in by_date:
+                by_date[d] = []
+            by_date[d].append(item)
+
+        sorted_dates = sorted(by_date.keys(), reverse=True)
+
+        for date_str in sorted_dates:
+            date_items = by_date[date_str]
+            att_items = [x for x in date_items if x['category'] == "Attendance"]
+            unk_items = [x for x in date_items if x['category'] == "Unknown"]
+
+            total_bytes = sum(x['size'] for x in date_items)
+            sz_str = f"{total_bytes / 1024:.1f} KB" if total_bytes < 1024*1024 else f"{total_bytes / (1024*1024):.2f} MB"
+
+            # Outer Card for each Date Folder
+            card = ctk.CTkFrame(self.cache_list_scroll, fg_color="#FFFFFF", corner_radius=8,
+                                border_width=1, border_color="#E5E7EB")
+            card.pack(fill="x", pady=6)
+
+            # Card Header Bar
+            hdr = ctk.CTkFrame(card, fg_color="#F9FAFB", corner_radius=8, height=48)
+            hdr.pack(fill="x")
+            hdr.pack_propagate(False)
+
+            # Folder Icon & Date Name
+            d_lbl = ctk.CTkLabel(hdr, text=f"📁 Date Folder: {date_str}", font=("Arial", 14, "bold"), text_color="#111827")
+            d_lbl.pack(side="left", padx=15)
+
+            # Stats summary badges
+            stats_str = f"📸 {len(att_items)} Attendance  |  ❓ {len(unk_items)} Unknown"
+            ctk.CTkLabel(hdr, text=stats_str, font=("Arial", 11), text_color="#4B5563",
+                         fg_color="#E5E7EB", corner_radius=6, padx=8, pady=2).pack(side="left", padx=10)
+
+            # Total size badge
+            ctk.CTkLabel(hdr, text=f"Total: {sz_str}", font=("Arial", 11, "bold"), text_color="#2563EB",
+                         fg_color="#DBEAFE", corner_radius=6, padx=8, pady=2).pack(side="left", padx=5)
+
+            is_expanded = ctk.BooleanVar(value=False)
+            body_frame = ctk.CTkFrame(card, fg_color="transparent")
+
+            def toggle_expand(b_frame=body_frame, var=is_expanded, toggle_btn=None, items_list=date_items):
+                if var.get():
+                    b_frame.pack_forget()
+                    var.set(False)
+                    if toggle_btn:
+                        toggle_btn.configure(text=f"▼ View Photos ({len(items_list)})", fg_color="#F3F4F6", text_color="#374151")
+                else:
+                    b_frame.pack(fill="x", padx=10, pady=(5, 10))
+                    var.set(True)
+                    if toggle_btn:
+                        toggle_btn.configure(text=f"▲ Hide Photos ({len(items_list)})", fg_color="#E5E7EB", text_color="#111827")
+                    if not b_frame.winfo_children():
+                        self._populate_date_body_frame(b_frame, items_list)
+
+            exp_btn = ctk.CTkButton(hdr, text=f"▼ View Photos ({len(date_items)})", font=("Arial", 11, "bold"),
+                                    fg_color="#F3F4F6", hover_color="#E5E7EB", text_color="#374151",
+                                    width=130, height=32)
+            exp_btn.configure(command=lambda btn=exp_btn: toggle_expand(toggle_btn=btn))
+            exp_btn.pack(side="right", padx=10)
+
+            # Clear Date Cache Button
+            del_date_btn = ctk.CTkButton(hdr, text=f"🗑️ Clear {date_str} Cache", font=("Arial", 11, "bold"),
+                                         fg_color="#DC2626", hover_color="#B91C1C", text_color="white",
+                                         height=32, command=lambda d=date_str: self.clear_date_image_cache(d))
+            del_date_btn.pack(side="right", padx=5)
+            Tooltip(del_date_btn, f"Delete all cached images captured on {date_str} from disk.\n(Attendance database records remain 100% intact)")
+
+    def _populate_date_body_frame(self, container_frame, items):
+        hdr_row = ctk.CTkFrame(container_frame, fg_color="#F3F4F6", height=32, corner_radius=4)
+        hdr_row.pack(fill="x", pady=(5, 5))
+        hdr_row.pack_propagate(False)
+
+        ctk.CTkLabel(hdr_row, text=" Preview", font=("Arial", 10, "bold"), width=60, anchor="w").pack(side="left", padx=5)
+        ctk.CTkLabel(hdr_row, text="Category", font=("Arial", 10, "bold"), width=120, anchor="w").pack(side="left", padx=5)
+        ctk.CTkLabel(hdr_row, text="File Name", font=("Arial", 10, "bold"), width=240, anchor="w").pack(side="left", padx=5)
+        ctk.CTkLabel(hdr_row, text="Size", font=("Arial", 10, "bold"), width=80, anchor="w").pack(side="left", padx=5)
+        ctk.CTkLabel(hdr_row, text="Time", font=("Arial", 10, "bold"), width=120, anchor="w").pack(side="left", padx=5)
+        ctk.CTkLabel(hdr_row, text="Action", font=("Arial", 10, "bold"), anchor="e").pack(side="right", padx=15)
+
+        for item in items:
+            r = ctk.CTkFrame(container_frame, fg_color="#FAFAFA", height=50, corner_radius=6,
+                             border_width=1, border_color="#E5E7EB")
+            r.pack(fill="x", pady=2)
+            r.pack_propagate(False)
+
+            # Preview
+            img_lbl = ctk.CTkLabel(r, text="📷", font=("Arial", 13), width=40, height=40, fg_color="#E5E7EB", corner_radius=4)
+            img_lbl.pack(side="left", padx=8, pady=5)
+            if os.path.exists(item['path']):
+                try:
+                    pil = Image.open(item['path']).resize((40, 40))
+                    ci = ctk.CTkImage(light_image=pil, dark_image=pil, size=(40, 40))
+                    img_lbl.configure(image=ci, text="")
+                    img_lbl.image = ci
+                except Exception:
+                    pass
+
+            # Category badge
+            cat_bg = "#D1FAE5" if item['category'] == "Attendance" else "#FEF3C7"
+            cat_fg = "#065F46" if item['category'] == "Attendance" else "#92400E"
+            ctk.CTkLabel(r, text=item['category'], font=("Arial", 10, "bold"),
+                         fg_color=cat_bg, text_color=cat_fg, corner_radius=4, width=110, padx=6, pady=2).pack(side="left", padx=5)
+
+            # File Name
+            ctk.CTkLabel(r, text=item['filename'], font=("Arial", 10, "bold"), text_color="#1F2937",
+                         width=240, anchor="w").pack(side="left", padx=5)
+
+            # Size
+            sz_str = f"{item['size'] / 1024:.1f} KB" if item['size'] < 1024*1024 else f"{item['size'] / (1024*1024):.2f} MB"
+            ctk.CTkLabel(r, text=sz_str, font=("Arial", 10), text_color="#4B5563",
+                         width=80, anchor="w").pack(side="left", padx=5)
+
+            # Time
+            time_str = datetime.fromtimestamp(item['mtime']).strftime('%H:%M:%S')
+            ctk.CTkLabel(r, text=time_str, font=("Arial", 10), text_color="#6B7280",
+                         width=120, anchor="w").pack(side="left", padx=5)
+
+            # Delete button
+            del_btn = ctk.CTkButton(r, text="🗑️ Delete", width=90, height=26,
+                                    font=("Arial", 10, "bold"), fg_color="#DC3545", hover_color="#C82333", text_color="white",
+                                    command=lambda p=item['path']: self.delete_single_cache_image(p))
+            del_btn.pack(side="right", padx=10)
+            Tooltip(del_btn, "Delete this cached photo file from disk.\n(Attendance database record remains 100% intact)")
+
+    def _render_flat_image_list(self, filtered):
+        # Table Header
+        hdr_row = ctk.CTkFrame(self.cache_list_scroll, fg_color="#F3F4F6", height=36, corner_radius=4)
+        hdr_row.pack(fill="x", pady=(0, 5))
+        hdr_row.pack_propagate(False)
+
+        ctk.CTkLabel(hdr_row, text=" Preview", font=("Arial", 11, "bold"), width=70, anchor="w").pack(side="left", padx=5)
+        ctk.CTkLabel(hdr_row, text="Category / Folder", font=("Arial", 11, "bold"), width=160, anchor="w").pack(side="left", padx=5)
+        ctk.CTkLabel(hdr_row, text="File Name", font=("Arial", 11, "bold"), width=240, anchor="w").pack(side="left", padx=5)
+        ctk.CTkLabel(hdr_row, text="Size", font=("Arial", 11, "bold"), width=90, anchor="w").pack(side="left", padx=5)
+        ctk.CTkLabel(hdr_row, text="Date Modified", font=("Arial", 11, "bold"), width=140, anchor="w").pack(side="left", padx=5)
+        ctk.CTkLabel(hdr_row, text="Action", font=("Arial", 11, "bold"), anchor="e").pack(side="right", padx=15)
+
+        for item in filtered[:150]:
+            r = ctk.CTkFrame(self.cache_list_scroll, fg_color="#FFFFFF", height=54, corner_radius=6,
+                             border_width=1, border_color="#F3F4F6")
+            r.pack(fill="x", pady=2)
+            r.pack_propagate(False)
+
+            # 1. Preview
+            img_lbl = ctk.CTkLabel(r, text="📷", font=("Arial", 14), width=44, height=44, fg_color="#E5E7EB", corner_radius=4)
+            img_lbl.pack(side="left", padx=8, pady=5)
+
+            if os.path.exists(item['path']):
+                try:
+                    pil = Image.open(item['path']).resize((44, 44))
+                    ci = ctk.CTkImage(light_image=pil, dark_image=pil, size=(44, 44))
+                    img_lbl.configure(image=ci, text="")
+                    img_lbl.image = ci
+                except Exception:
+                    pass
+
+            # 2. Category & Folder
+            cat_bg = "#D1FAE5" if item['category'] == "Attendance" else "#FEF3C7"
+            cat_fg = "#065F46" if item['category'] == "Attendance" else "#92400E"
+
+            cat_f = ctk.CTkFrame(r, fg_color="transparent", width=160)
+            cat_f.pack(side="left", padx=5)
+            ctk.CTkLabel(cat_f, text=item['category'], font=("Arial", 10, "bold"),
+                         fg_color=cat_bg, text_color=cat_fg, corner_radius=4, padx=6, pady=2).pack(anchor="w", pady=(4, 2))
+            ctk.CTkLabel(cat_f, text=item['folder'], font=("Arial", 9), text_color="#6B7280", anchor="w").pack(anchor="w")
+
+            # 3. File name
+            ctk.CTkLabel(r, text=item['filename'], font=("Arial", 11, "bold"), text_color="#1F2937",
+                         width=240, anchor="w").pack(side="left", padx=5)
+
+            # 4. File size
+            sz_str = f"{item['size'] / 1024:.1f} KB" if item['size'] < 1024*1024 else f"{item['size'] / (1024*1024):.2f} MB"
+            ctk.CTkLabel(r, text=sz_str, font=("Arial", 10), text_color="#4B5563",
+                         width=90, anchor="w").pack(side="left", padx=5)
+
+            # 5. Date Modified
+            mod_dt = datetime.fromtimestamp(item['mtime']).strftime('%d-%m-%Y %H:%M')
+            ctk.CTkLabel(r, text=mod_dt, font=("Arial", 10), text_color="#6B7280",
+                         width=140, anchor="w").pack(side="left", padx=5)
+
+            # 6. Delete Button
+            del_btn = ctk.CTkButton(r, text="🗑️ Delete Cache", width=110, height=28,
+                                    font=("Arial", 10, "bold"), fg_color="#DC3545", hover_color="#C82333", text_color="white",
+                                    command=lambda p=item['path']: self.delete_single_cache_image(p))
+            del_btn.pack(side="right", padx=10)
+            Tooltip(del_btn, "Delete this cached image file from disk.\n(Attendance database record remains 100% intact)")
+
+        if len(filtered) > 150:
+            ctk.CTkLabel(self.cache_list_scroll, text=f"Showing top 150 of {len(filtered)} items. Use search box to filter.",
+                         font=("Arial", 10, "italic"), text_color="gray").pack(pady=8)
+
+    def clear_date_image_cache(self, date_str):
+        """Deletes all cached image files for a specific date across records/attendance and records/unknown."""
+        target_files = [x for x in self.cached_image_files if x['date'] == date_str]
+
+        if not target_files:
+            messagebox.showinfo("Info", f"No cached images found for date {date_str}.")
+            return
+
+        total_bytes = sum(x['size'] for x in target_files)
+        sz_str = f"{total_bytes / 1024:.1f} KB" if total_bytes < 1024*1024 else f"{total_bytes / (1024*1024):.2f} MB"
+
+        if messagebox.askyesno("Confirm Clear Date Cache",
+                               f"Are you sure you want to delete ALL {len(target_files)} cached images for Date Folder '{date_str}'?\n\n"
+                               f"Total Size to Free: {sz_str}\n\n"
+                               "IMPORTANT: Attendance database records for this date will remain 100% INTACT."):
+            deleted_count = 0
+            directories_to_check = set()
+
+            for item in target_files:
+                fp = item['path']
+                try:
+                    if os.path.exists(fp):
+                        os.remove(fp)
+                        deleted_count += 1
+                        directories_to_check.add(os.path.dirname(fp))
+                except Exception:
+                    pass
+
+            for d_path in directories_to_check:
+                try:
+                    if os.path.exists(d_path) and not os.listdir(d_path):
+                        os.rmdir(d_path)
+                except Exception:
+                    pass
+
+            messagebox.showinfo("Date Cache Cleared",
+                                f"Successfully deleted {deleted_count} cached images ({sz_str}) for date '{date_str}'.\nDatabase records were preserved.")
+            self.refresh_image_cache_page()
+
+    def delete_single_cache_image(self, img_path):
+        """Deletes a single cached image from disk without touching database records."""
+        if not os.path.exists(img_path):
+            messagebox.showwarning("File Missing", "This cached image no longer exists on disk.")
+            self.refresh_image_cache_page()
+            return
+
+        if messagebox.askyesno("Confirm Delete", f"Delete cached image file?\n\n{os.path.basename(img_path)}\n\n(Note: Attendance records in database will NOT be deleted)"):
+            try:
+                os.remove(img_path)
+                messagebox.showinfo("Success", "Cached image file deleted successfully.\nDatabase records remain intact.")
+                self.refresh_image_cache_page()
+            except Exception as e:
+                messagebox.showerror("Error", f"Could not delete file: {e}")
+
+    def clear_folder_image_cache(self, folder_type):
+        """Deletes all cached images in records/attendance or records/unknown without touching database records."""
+        target_dir = os.path.join("records", "attendance") if folder_type == "attendance" else os.path.join("records", "unknown")
+
+        if not os.path.exists(target_dir):
+            messagebox.showinfo("Info", "Directory does not exist or is empty.")
+            return
+
+        all_files = []
+        for root, dirs, files in os.walk(target_dir):
+            for file in files:
+                if file.lower().endswith(('.jpg', '.jpeg', '.png')):
+                    all_files.append(os.path.join(root, file))
+
+        if not all_files:
+            messagebox.showinfo("Info", f"No cached image files found in {target_dir}.")
+            return
+
+        name_str = "Attendance" if folder_type == "attendance" else "Unknown Captures"
+        if messagebox.askyesno("Confirm Clear Cache",
+                               f"Are you sure you want to delete ALL {len(all_files)} cached images in '{name_str}'?\n\n"
+                               f"Folder: {target_dir}\n\n"
+                               "IMPORTANT: Attendance database records will remain 100% INTACT."):
+            deleted_count = 0
+            for fp in all_files:
+                try:
+                    os.remove(fp)
+                    deleted_count += 1
+                except Exception:
+                    pass
+
+            messagebox.showinfo("Cache Cleared", f"Cleared {deleted_count} cached images from '{name_str}'.\nDatabase records were preserved.")
+            self.refresh_image_cache_page()
+
         # Header
         h_f = ctk.CTkFrame(self.sql_scroll, fg_color="#F3F4F6", height=40)
         h_f.pack(fill="x", pady=(0, 5))
@@ -3454,19 +3807,9 @@ class AutoAttendanceApp(ctk.CTk):
     # ── Navigation ────────────────────────────────────────────────────────────
 
     def show_frame(self, name):
-        if name == "cache_manager":
-            self.show_image_cache_popup()
-            return
-
-        restricted = ["reports", "annually_report", "org_chart", "cache_manager", "settings", "sql"]
-        if name in restricted and not self.is_admin:
-            messagebox.showwarning("Restricted", "Admin login required to access this page.")
-            return
-
         for f in self.frames.values():
             f.grid_forget()
-        if name in self.frames:
-            self.frames[name].grid(row=0, column=0, sticky="nsew")
+        self.frames[name].grid(row=0, column=0, sticky="nsew")
         self.page_title.configure(text=name.replace("_", " ").title())
         for k, btn in self.nav_buttons.items():
             btn.configure(fg_color="#007BFF" if k == name else "transparent",
@@ -3524,6 +3867,13 @@ class AutoAttendanceApp(ctk.CTk):
 
         self._refresh_waiting_panel()
 
+    def _dismiss_waiting_item(self, att_id):
+        conn = sqlite3.connect("database/attendance.db")
+        conn.execute("DELETE FROM attendance WHERE id=?", (att_id,))
+        conn.commit()
+        conn.close()
+        self.refresh_stats()
+
     def _refresh_waiting_panel(self):
         for w in self.waiting_scroll.winfo_children():
             w.destroy()
@@ -3533,48 +3883,46 @@ class AutoAttendanceApp(ctk.CTk):
                          font=("Arial", 11), text_color="gray").pack(pady=8)
             return
         for att_id, img_path, t in rows:
-            r = ctk.CTkFrame(self.waiting_scroll, fg_color="#FEF3C7", corner_radius=8, height=54, border_width=1, border_color="#FCD34D")
+            r = ctk.CTkFrame(self.waiting_scroll, fg_color="#FFF3CD", corner_radius=8, height=62)
             r.pack(fill="x", pady=3)
             r.pack_propagate(False)
 
-            # Photo preview thumbnail
-            img_f = ctk.CTkFrame(r, width=40, height=40, fg_color="transparent")
-            img_f.pack(side="left", padx=(6, 2), pady=6)
-            img_f.pack_propagate(False)
-            img_lbl = ctk.CTkLabel(img_f, text="👤", font=("Arial", 14))
-            img_lbl.pack(expand=True)
+            # [1] Face Photo Thumbnail
+            img_lbl = ctk.CTkLabel(r, text="📷", font=("Arial", 16), width=48, height=48, fg_color="#FFEBAA", corner_radius=6)
+            img_lbl.pack(side="left", padx=(6, 4), pady=6)
+            
             if img_path and os.path.exists(img_path):
                 try:
-                    pil = Image.open(img_path).resize((36, 36))
-                    ci = ctk.CTkImage(light_image=pil, dark_image=pil, size=(36, 36))
+                    pil = Image.open(img_path).resize((48, 48))
+                    ci = ctk.CTkImage(light_image=pil, dark_image=pil, size=(48, 48))
                     img_lbl.configure(image=ci, text="")
-                except: pass
+                    img_lbl.image = ci
+                except Exception:
+                    pass
 
-            info_f = ctk.CTkFrame(r, fg_color="transparent")
-            info_f.pack(side="left", fill="both", expand=True, padx=4)
-            time_str = str(t)[11:19] if len(str(t)) >= 19 else str(t)[:16]
-            ctk.CTkLabel(info_f, text="❓ Unknown", font=("Arial", 11, "bold"), text_color="#92400E", anchor="w").pack(pady=(6, 0), fill="x")
-            ctk.CTkLabel(info_f, text=f"Captured {time_str}", font=("Arial", 9), text_color="#B45309", anchor="w").pack(fill="x")
+            # [2] Time & Info text
+            txt_f = ctk.CTkFrame(r, fg_color="transparent")
+            txt_f.pack(side="left", fill="both", expand=True, padx=2)
+            
+            time_str = str(t)[11:16] if len(str(t)) >= 16 else str(t)
+            ctk.CTkLabel(txt_f, text="Unknown", font=("Arial", 10, "bold"), text_color="#856404", anchor="w").pack(anchor="w", pady=(8, 0))
+            ctk.CTkLabel(txt_f, text=time_str, font=("Arial", 9), text_color="#856404", anchor="w").pack(anchor="w")
 
+            # [3] Action buttons frame
             btn_f = ctk.CTkFrame(r, fg_color="transparent")
-            btn_f.pack(side="right", padx=6)
+            btn_f.pack(side="right", padx=6, pady=4)
 
-            ctk.CTkButton(btn_f, text="Identify", width=65, height=28, font=("Arial", 9, "bold"),
-                           fg_color="#F59E0B", text_color="white", hover_color="#D97706",
-                           command=lambda aid=att_id, ip=img_path:
-                           self.identify_unknown_popup(aid, ip)).pack(side="left", padx=2)
+            x_btn = ctk.CTkButton(btn_f, text="✕", width=68, height=20, font=("Arial", 10, "bold"),
+                                  fg_color="#DC3545", hover_color="#C82333", text_color="white",
+                                  command=lambda aid=att_id: self._dismiss_waiting_item(aid))
+            x_btn.pack(side="top", pady=(0, 2))
+            Tooltip(x_btn, "Dismiss / Ignore this unrecognised capture")
 
-            ctk.CTkButton(btn_f, text="❌", width=26, height=28, font=("Arial", 9, "bold"),
-                           fg_color="transparent", text_color="#DC3545", hover_color="#FEE2E2",
-                           command=lambda aid=att_id: self.dismiss_unknown(aid)).pack(side="left", padx=1)
-
-    def dismiss_unknown(self, att_id):
-        conn = sqlite3.connect("database/attendance.db")
-        conn.execute("DELETE FROM attendance WHERE id=?", (att_id,))
-        conn.commit()
-        conn.close()
-        self.refresh_stats()
-        self._refresh_waiting_panel()
+            id_btn = ctk.CTkButton(btn_f, text="Identify", width=68, height=24, font=("Arial", 9, "bold"),
+                                   fg_color="#FFC107", text_color="black", hover_color="#E0A800",
+                                   command=lambda aid=att_id, ip=img_path:
+                                   self.identify_unknown_popup(aid, ip))
+            id_btn.pack(side="top")
 
     # ── Session Controls ──────────────────────────────────────────────────────
 
@@ -3783,34 +4131,55 @@ class AutoAttendanceApp(ctk.CTk):
 
         dialog = ctk.CTkToplevel(self)
         dialog.title("Manual Add Attendee")
-        dialog.geometry("400x500")
+        dialog.geometry("450x540")
         dialog.attributes("-topmost", True)
 
-        ctk.CTkLabel(dialog, text="Select Member to Add:", font=("Arial", 14, "bold")).pack(pady=10)
+        ctk.CTkLabel(dialog, text="Select Member to Add:", font=("Arial", 16, "bold"), text_color="#1F2937").pack(pady=(15, 5))
         
-        s_entry = ctk.CTkEntry(dialog, placeholder_text="Search all members...")
-        s_entry.pack(fill="x", padx=20, pady=5)
+        s_entry = ctk.CTkEntry(dialog, placeholder_text="Search member name or code...", height=36)
+        s_entry.pack(fill="x", padx=20, pady=(5, 5))
 
-        list_f = ctk.CTkScrollableFrame(dialog)
-        list_f.pack(fill="both", expand=True, padx=20, pady=10)
+        info_lbl = ctk.CTkLabel(dialog, text="Showing top matches (type to filter)", font=("Arial", 10, "italic"), text_color="gray")
+        info_lbl.pack(pady=(0, 5))
+
+        list_f = ctk.CTkScrollableFrame(dialog, fg_color="#F9FAFB", corner_radius=8)
+        list_f.pack(fill="both", expand=True, padx=20, pady=(0, 15))
 
         def populate_list():
-            for w in list_f.winfo_children(): w.destroy()
-            q = s_entry.get().lower()
+            for w in list_f.winfo_children():
+                w.destroy()
+            q = s_entry.get().lower().strip()
             
             conn = sqlite3.connect("database/attendance.db")
-            # Exclude those already present in this session
+            # Exclude those already present in this session, limit results to top 50 to prevent UI lag
             members = conn.execute("""
                 SELECT member_code, name, type FROM members 
                 WHERE member_code NOT IN (SELECT member_code FROM attendance WHERE session_id=?)
                 AND (LOWER(name) LIKE ? OR LOWER(member_code) LIKE ?)
+                ORDER BY name ASC
+                LIMIT 50
             """, (self.backend.active_session_id, f"%{q}%", f"%{q}%")).fetchall()
             conn.close()
 
+            if not members:
+                ctk.CTkLabel(list_f, text="No eligible members found.", font=("Arial", 12), text_color="gray").pack(pady=20)
+                info_lbl.configure(text="No matches found.")
+                return
+
+            info_lbl.configure(text=f"Showing top {len(members)} match(es)")
+
             for code, name, mtype in members:
-                btn = ctk.CTkButton(list_f, text=f"{name} ({code})", anchor="w", fg_color="transparent", text_color="#333", hover_color="#F0F2F5",
-                                    command=lambda c=code, n=name, t=mtype: [self.do_manual_mark(c, n, t), dialog.destroy()])
-                btn.pack(fill="x", pady=1)
+                item_f = ctk.CTkFrame(list_f, fg_color="#FFFFFF", height=42, corner_radius=6, border_width=1, border_color="#E5E7EB")
+                item_f.pack(fill="x", pady=2)
+                item_f.pack_propagate(False)
+
+                lbl_text = f"👤  {name} ({code})"
+                ctk.CTkLabel(item_f, text=lbl_text, font=("Arial", 11, "bold"), text_color="#1F2937", anchor="w").pack(side="left", padx=10)
+
+                add_btn = ctk.CTkButton(item_f, text="➕ Add", width=70, height=28, font=("Arial", 10, "bold"),
+                                        fg_color="#28A745", hover_color="#218838", text_color="white",
+                                        command=lambda c=code, n=name, t=mtype: [self.do_manual_mark(c, n, t), dialog.destroy()])
+                add_btn.pack(side="right", padx=8)
 
         s_entry.bind("<KeyRelease>", lambda e: populate_list())
         populate_list()
@@ -3848,24 +4217,82 @@ class AutoAttendanceApp(ctk.CTk):
         self.after(50, self.process_gui_queue)
 
     def manual_remove_attendee(self):
-        if not hasattr(self.backend, "active_session_id") or not self.backend.active_session_id: return
+        if not hasattr(self.backend, "active_session_id") or not self.backend.active_session_id:
+            messagebox.showwarning("No Session", "Please start a session first.")
+            return
+
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Remove Attendee from Session")
+        dialog.geometry("450x540")
+        dialog.attributes("-topmost", True)
+
+        ctk.CTkLabel(dialog, text="Current Session Attendees:", font=("Arial", 16, "bold"), text_color="#DC2626").pack(pady=(15, 5))
         
-        # This is a bit tricky: we ask for the name/code or use the selection
-        dialog = ctk.CTkInputDialog(text="Enter Member Code to Remove:", title="Remove Attendee")
-        code = dialog.get_input()
-        if code:
+        s_entry = ctk.CTkEntry(dialog, placeholder_text="Search present attendee...", height=36)
+        s_entry.pack(fill="x", padx=20, pady=(5, 5))
+
+        info_lbl = ctk.CTkLabel(dialog, text="Select attendee to remove from session", font=("Arial", 10, "italic"), text_color="gray")
+        info_lbl.pack(pady=(0, 5))
+
+        list_f = ctk.CTkScrollableFrame(dialog, fg_color="#F9FAFB", corner_radius=8)
+        list_f.pack(fill="both", expand=True, padx=20, pady=(0, 15))
+
+        def populate_present_list():
+            for w in list_f.winfo_children():
+                w.destroy()
+            q = s_entry.get().lower().strip()
+
             conn = sqlite3.connect("database/attendance.db")
-            conn.execute("DELETE FROM attendance WHERE session_id=? AND member_code=?", (self.backend.active_session_id, code))
-            conn.commit()
+            # Fetch members present in active session
+            present_members = conn.execute("""
+                SELECT a.member_code, a.name, m.type, m.title
+                FROM attendance a
+                LEFT JOIN members m ON a.member_code = m.member_code
+                WHERE a.session_id = ?
+                AND (LOWER(a.name) LIKE ? OR LOWER(a.member_code) LIKE ?)
+                ORDER BY a.name ASC
+            """, (self.backend.active_session_id, f"%{q}%", f"%{q}%")).fetchall()
             conn.close()
-            
-            # Remove from UI list
-            for card in self.checkin_scroll.winfo_children():
-                if hasattr(card, "member_code") and card.member_code == code:
-                    card.destroy()
-            
-            self.refresh_stats()
-            messagebox.showinfo("Success", f"Member {code} removed from session.")
+
+            if not present_members:
+                ctk.CTkLabel(list_f, text="No present attendees match search.", font=("Arial", 12), text_color="gray").pack(pady=20)
+                info_lbl.configure(text="No matching attendees.")
+                return
+
+            info_lbl.configure(text=f"Total {len(present_members)} attendee(s) present")
+
+            for code, name, mtype, title in present_members:
+                item_f = ctk.CTkFrame(list_f, fg_color="#FFFFFF", height=42, corner_radius=6, border_width=1, border_color="#E5E7EB")
+                item_f.pack(fill="x", pady=2)
+                item_f.pack_propagate(False)
+
+                disp_title = f"{title} " if title else ""
+                lbl_text = f"👤  {disp_title}{name} ({code})"
+                ctk.CTkLabel(item_f, text=lbl_text, font=("Arial", 11, "bold"), text_color="#1F2937", anchor="w").pack(side="left", padx=10)
+
+                rem_btn = ctk.CTkButton(item_f, text="🗑️ Remove", width=80, height=28, font=("Arial", 10, "bold"),
+                                        fg_color="#DC2626", hover_color="#B91C1C", text_color="white",
+                                        command=lambda c=code, n=name: execute_removal(c, n))
+                rem_btn.pack(side="right", padx=8)
+
+        def execute_removal(code, name):
+            if messagebox.askyesno("Confirm Removal", f"Remove '{name}' ({code}) from the current session?"):
+                conn = sqlite3.connect("database/attendance.db")
+                conn.execute("DELETE FROM attendance WHERE session_id=? AND member_code=?", (self.backend.active_session_id, code))
+                conn.commit()
+                conn.close()
+
+                # Remove from dashboard UI card list
+                for card in self.checkin_scroll.winfo_children():
+                    if hasattr(card, "member_code") and card.member_code == code:
+                        card.destroy()
+
+                self.refresh_stats()
+                messagebox.showinfo("Removed", f"{name} ({code}) has been removed from this session.")
+                populate_present_list()
+
+        s_entry.bind("<KeyRelease>", lambda e: populate_present_list())
+        populate_present_list()
 
     def add_attendee_card(self, name, img_path, m_type, code, title=""):
         # Prevent duplicates
@@ -3981,7 +4408,8 @@ class AutoAttendanceApp(ctk.CTk):
                             else:
                                 self.activity_log.insert("end", f"[{ts}] ❓ Unknown face captured\n")
                                 if res.get('new'):
-                                    self._refresh_waiting_panel()
+                                    # unknown logic - stays in waiting list
+                                    pass
                             self.activity_log.see("end")
                 except queue.Empty:
                     pass
@@ -4023,32 +4451,37 @@ class AutoAttendanceApp(ctk.CTk):
     def identify_unknown_popup(self, att_id, img_path):
         popup = ctk.CTkToplevel(self)
         popup.title("Identify Person")
-        popup.geometry("480x620")
+        popup.geometry("500x640")
         popup.attributes("-topmost", True)
         popup.grab_set()
 
-        ctk.CTkLabel(popup, text="Identify Unrecognised Person",
-                     font=("Arial", 15, "bold")).pack(pady=(18, 10))
+        # Fixed bottom action row (always visible at bottom of modal)
+        btn_row = ctk.CTkFrame(popup, fg_color="transparent")
+        btn_row.pack(side="bottom", pady=12)
+
+        # Main scrollable container for all form content and headers
+        form = ctk.CTkScrollableFrame(popup, fg_color="transparent")
+        form.pack(side="top", fill="both", expand=True, padx=15, pady=(10, 5))
+
+        ctk.CTkLabel(form, text="Identify Unrecognised Person",
+                     font=("Arial", 16, "bold")).pack(pady=(10, 8))
 
         # Show the captured photo
         try:
-            pil = Image.open(img_path).resize((140, 140))
-            ci  = ctk.CTkImage(light_image=pil, dark_image=pil, size=(140, 140))
-            lbl = ctk.CTkLabel(popup, image=ci, text="")
+            pil = Image.open(img_path).resize((160, 160))
+            ci  = ctk.CTkImage(light_image=pil, dark_image=pil, size=(160, 160))
+            lbl = ctk.CTkLabel(form, image=ci, text="")
             lbl.image = ci
             lbl.pack(pady=4)
         except Exception:
-            ctk.CTkLabel(popup, text="📷", font=("Arial", 48)).pack(pady=4)
+            ctk.CTkLabel(form, text="📷", font=("Arial", 48)).pack(pady=4)
 
-        ctk.CTkLabel(popup, text="Action:", anchor="w").pack(fill="x", padx=30, pady=(10, 2))
+        ctk.CTkLabel(form, text="Action:", font=("Arial", 11, "bold"), anchor="w").pack(fill="x", padx=10, pady=(10, 2))
         action_var = ctk.StringVar(value="register_new")
-        ctk.CTkRadioButton(popup, text="Register as NEW member",
-                           variable=action_var, value="register_new").pack(anchor="w", padx=40)
-        ctk.CTkRadioButton(popup, text="Link to EXISTING member code",
-                           variable=action_var, value="link_existing").pack(anchor="w", padx=40, pady=(4, 12))
-
-        form = ctk.CTkScrollableFrame(popup, fg_color="transparent", height=320)
-        form.pack(fill="both", expand=True, padx=20)
+        ctk.CTkRadioButton(form, text="Register as NEW member",
+                           variable=action_var, value="register_new").pack(anchor="w", padx=20)
+        ctk.CTkRadioButton(form, text="Link to EXISTING member code",
+                           variable=action_var, value="link_existing").pack(anchor="w", padx=20, pady=(4, 12))
 
         # Form Fields
         ctk.CTkLabel(form, text="Existing member code (if linking):",
@@ -4062,7 +4495,7 @@ class AutoAttendanceApp(ctk.CTk):
             conn.close()
             if m:
                 name_e.delete(0, "end");   name_e.insert(0, m[0] or "")
-                type_cb.set(m[1] or "Area Member")
+                type_cb.set(m[1] or "Member")
                 set_dob(m[2] or "")
                 area_e.delete(0, "end");   area_e.insert(0, m[3] or "")
                 phone_e.delete(0, "end");  phone_e.insert(0, m[4] or "")
@@ -4086,13 +4519,21 @@ class AutoAttendanceApp(ctk.CTk):
 
         ctk.CTkLabel(form, text="Title", font=("Arial", 11, "bold")).pack(anchor="w", pady=(8, 0))
         title_var = ctk.StringVar(value="")
-        title_cb = ctk.CTkComboBox(form, variable=title_var, values=["", "Brother", "Sister"], width=360)
+        title_opts = [""] + self.get_master_options("title", ["Brother", "Sister", "Preacher", "Preceptor", "Deacon", "Deaconess"])
+        title_cb = ctk.CTkComboBox(form, variable=title_var, values=title_opts, width=360)
         title_cb.pack(pady=3, fill="x")
 
-        ctk.CTkLabel(form, text="Type (Area Member / Other Area Member / Truth Seeker)", font=("Arial", 11, "bold")).pack(anchor="w", pady=(8, 0))
+        ctk.CTkLabel(form, text="Type", font=("Arial", 11, "bold")).pack(anchor="w", pady=(8, 0))
         type_var = ctk.StringVar(value="Area Member")
-        type_cb = ctk.CTkComboBox(form, variable=type_var, values=["Area Member", "Other Area Member", "Truth Seeker"], width=360)
+        type_opts = self.get_master_options("type", ["Area Member", "Other Area Member", "Truth Seeker"])
+        type_cb = ctk.CTkComboBox(form, variable=type_var, values=type_opts, width=360)
         type_cb.pack(pady=3, fill="x")
+
+        ctk.CTkLabel(form, text="REU Class (Religious Education Unit)", font=("Arial", 11, "bold")).pack(anchor="w", pady=(8, 0))
+        reu_var = ctk.StringVar(value="N/A")
+        reu_opts = self.get_master_options("reu_class", ["N/A", "Junior Youth (JY)", "Upper Primary (UP)", "Lower Primary (LP)"])
+        reu_cb = ctk.CTkComboBox(form, variable=reu_var, values=reu_opts, width=360)
+        reu_cb.pack(pady=3, fill="x")
 
         ctk.CTkLabel(form, text="Area", font=("Arial", 11, "bold")).pack(anchor="w", pady=(8, 0))
         area_e = ctk.CTkEntry(form, width=360, placeholder_text="e.g. Kuala Lumpur")
@@ -4137,11 +4578,7 @@ class AutoAttendanceApp(ctk.CTk):
 
         hs_var = tk.BooleanVar(value=False)
         hs_cb = ctk.CTkCheckBox(form, text="Holy Spirit Received", variable=hs_var, font=("Arial", 12, "bold"))
-        hs_cb.pack(anchor="w", pady=6)
-
-        save_photo_var = tk.BooleanVar(value=True)
-        save_photo_cb = ctk.CTkCheckBox(form, text="Save photo for future face recognition", variable=save_photo_var, font=("Arial", 11, "bold"))
-        save_photo_cb.pack(anchor="w", pady=6)
+        hs_cb.pack(anchor="w", pady=10)
 
         ctk.CTkLabel(form, text="Remark", font=("Arial", 11, "bold")).pack(anchor="w", pady=(8, 0))
         remark_e = ctk.CTkTextbox(form, width=360, height=70) # ~3 lines
@@ -4158,9 +4595,9 @@ class AutoAttendanceApp(ctk.CTk):
 
             # --- DUPLICATE CHECK ---
             target_code = existing_code_e.get().strip() if action_var.get() == "link_existing" else None
-            if target_code and self.backend.active_session_id:
+            if target_code:
                 conn = sqlite3.connect("database/attendance.db")
-                exists = conn.execute("SELECT 1 FROM attendance WHERE session_id=? AND member_code=? AND status != 'unknown'", 
+                exists = conn.execute("SELECT 1 FROM attendance WHERE session_id=? AND member_code=?", 
                                      (self.backend.active_session_id, target_code)).fetchone()
                 conn.close()
                 if exists:
@@ -4174,24 +4611,10 @@ class AutoAttendanceApp(ctk.CTk):
                     messagebox.showwarning("Missing", "Member code required.", parent=popup)
                     return
                 try:
-                    # Update member title/details in DB
-                    data = {
-                        "name": name,
-                        "type": m_type,
-                        "title": title_cb.get(),
-                        "dob": get_dob(),
-                        "baptism_date": get_bap(),
-                        "area": area_e.get().strip(),
-                        "address": address_e.get().strip(),
-                        "email": email_e.get().strip(),
-                        "phone": phone_e.get().strip(),
-                        "has_holy_spirit": hs_var.get(),
-                        "remark": remark_e.get("1.0", "end").strip(),
-                        "age_category": age_cat_var.get()
-                    }
-                    self.backend.register_member(data, force_code=code)
-                    # Promote attendance row & train face model instantly
-                    self.backend.identify_unknown(att_id, name, code, m_type, img_path=img_path, update_photo=save_photo_var.get())
+                    # Update member title/details if needed
+                    self.backend.register_member({"name": name, "title": title_cb.get(), "type": m_type}, force_code=code)
+                    # Promote attendance row
+                    self.backend.identify_unknown(att_id, name, code, m_type)
                 except Exception as e:
                     messagebox.showerror("Save Error", f"Could not update member record: {str(e)}", parent=popup)
                     return
@@ -4205,10 +4628,24 @@ class AutoAttendanceApp(ctk.CTk):
                         return
                         
                 # Register brand-new member
+                # Load extra fields schema
+                extra_entries = {}
+                conn = sqlite3.connect("database/attendance.db")
+                cursor = conn.cursor()
+                cursor.execute("PRAGMA table_info(members)")
+                db_cols = [row[1].lower() for row in cursor.fetchall()]
+                conn.close()
+                
+                standard_fields = ["member_code", "name", "type", "age", "dob", "baptism_date", 
+                                   "address", "email", "phone", "has_holy_spirit", "image_path", 
+                                   "registration_date", "area", "remark", "age_category", "title", "reu_class"]
+                extra_fields = [c for c in db_cols if c not in standard_fields]
+                
                 data = {
                     "name": name,
                     "type": m_type,
                     "title": title_var.get(),
+                    "reu_class": reu_var.get(),
                     "dob":  get_dob(),
                     "baptism_date": get_bap(),
                     "area": area_e.get().strip(),
@@ -4222,10 +4659,9 @@ class AutoAttendanceApp(ctk.CTk):
                 }
                 prefix = self.settings.get("member_prefix", "")
                 code = self.backend.register_member(data, prefix=prefix)
-                self.backend.identify_unknown(att_id, name, code, m_type, img_path=img_path, update_photo=True)
+                self.backend.identify_unknown(att_id, name, code, m_type)
 
             self.refresh_stats()
-            self._refresh_waiting_panel()
             self.refresh_logs_table()
             
             # Show in captured list right away
@@ -4244,9 +4680,6 @@ class AutoAttendanceApp(ctk.CTk):
                 self.refresh_stats()
                 self.refresh_logs_table()
                 popup.destroy()
-
-        btn_row = ctk.CTkFrame(popup, fg_color="transparent")
-        btn_row.pack(pady=14)
 
         ctk.CTkButton(btn_row, text="✔  Save & Identify", fg_color="#28A745",
                       hover_color="#218838", width=160, height=38, command=save).pack(side="left", padx=5)
@@ -4466,18 +4899,26 @@ class AutoAttendanceApp(ctk.CTk):
         # ── Title selection ───────────────────────────────────────────────────
         ctk.CTkLabel(scroll, text="Title", font=("Arial", 12, "bold")).pack(anchor="w", pady=(10, 0))
         title_var = ctk.StringVar(value=existing.get("title", "") or "")
-        title_cb = ctk.CTkComboBox(scroll, variable=title_var,
-                                    values=["", "Brother", "Sister"],
+        title_opts = [""] + self.get_master_options("title", ["Brother", "Sister", "Preacher", "Preceptor", "Deacon", "Deaconess"])
+        title_cb = ctk.CTkComboBox(scroll, variable=title_var, values=title_opts,
                                     width=400, state="disabled" if readonly else "normal")
         title_cb.pack(pady=4)
 
         # ── Type dropdown ─────────────────────────────────────────────────────
         ctk.CTkLabel(scroll, text="Type", font=("Arial", 12, "bold")).pack(anchor="w", pady=(10, 0))
         type_var = ctk.StringVar(value=existing.get("type", "Area Member") or "Area Member")
-        type_cb  = ctk.CTkComboBox(scroll, variable=type_var,
-                                    values=["Area Member", "Other Area Member", "Truth Seeker"],
+        type_opts = self.get_master_options("type", ["Area Member", "Other Area Member", "Truth Seeker"])
+        type_cb  = ctk.CTkComboBox(scroll, variable=type_var, values=type_opts,
                                     width=400, state="disabled" if readonly else "normal")
         type_cb.pack(pady=4)
+
+        # ── REU Class dropdown ─────────────────────────────────────────────────
+        ctk.CTkLabel(scroll, text="REU Class", font=("Arial", 12, "bold")).pack(anchor="w", pady=(10, 0))
+        reu_var = ctk.StringVar(value=existing.get("reu_class", "N/A") or "N/A")
+        reu_opts = self.get_master_options("reu_class", ["N/A", "Junior Youth (JY)", "Upper Primary (UP)", "Lower Primary (LP)"])
+        reu_cb  = ctk.CTkComboBox(scroll, variable=reu_var, values=reu_opts,
+                                   width=400, state="disabled" if readonly else "normal")
+        reu_cb.pack(pady=4)
 
         def update_age_cat_ui(dob):
             if not dob or dob == "--": 
@@ -4569,6 +5010,7 @@ class AutoAttendanceApp(ctk.CTk):
                     "name":          name_e.get().strip(),
                     "type":          type_var.get(),
                     "title":         title_var.get(),
+                    "reu_class":     reu_var.get(),
                     "dob":           get_dob(),
                     "baptism_date":  get_bap(),
                     "area":          area_e.get().strip(),
@@ -4613,6 +5055,381 @@ class AutoAttendanceApp(ctk.CTk):
                           width=200, height=42, command=save).pack(pady=22)
         else:
             ctk.CTkButton(scroll, text="Close", width=140, command=dialog.destroy).pack(pady=22)
+
+    # ── Master Data Page ────────────────────────────────────────────────────────
+    def init_master_data_page(self):
+        f = ctk.CTkFrame(self.container, fg_color="#F8F9FA", corner_radius=10)
+        self.frames["master_data"] = f
+
+        header_frame = ctk.CTkFrame(f, fg_color="transparent")
+        header_frame.pack(fill="x", padx=20, pady=(20, 10))
+
+        title_lbl = ctk.CTkLabel(header_frame, text="🗂 Master Data Dictionary", font=("Arial", 28, "bold"), text_color="#1F2937")
+        title_lbl.pack(anchor="w")
+        sub_lbl = ctk.CTkLabel(header_frame, text="Manage dropdown categories (Title, Member Type, REU Class) and report column preferences", font=("Arial", 14), text_color="#6B7280")
+        sub_lbl.pack(anchor="w")
+
+        # Info notice box explaining Master Data vs SQL Data
+        info_box = ctk.CTkFrame(header_frame, fg_color="#EFF6FF", border_width=1, border_color="#BFDBFE", corner_radius=8)
+        info_box.pack(fill="x", pady=(10, 0))
+        
+        info_text = (
+            "💡 How Master Data Works:\n"
+            "• Master Data is for managing picklist options (sub-categories) like Titles, Member Types, REU Classes, and Areas. Options can be added, edited, or deleted directly here.\n"
+            "• If you need to add a brand NEW database field/column (main category), please go to the '🗄 SQL Data' tab in the sidebar."
+        )
+        ctk.CTkLabel(info_box, text=info_text, font=("Arial", 12), text_color="#1E40AF", justify="left", anchor="w").pack(padx=15, pady=10, fill="x")
+
+        # Tabview for Picklist Manager vs Report Column Visibility
+        self.master_tabview = ctk.CTkTabview(f, fg_color="#FFFFFF", corner_radius=10)
+        self.master_tabview.pack(fill="both", expand=True, padx=20, pady=10)
+
+        tab_picklists = self.master_tabview.add("🗂 Categories & Picklists")
+        tab_columns   = self.master_tabview.add("👁 Report Column Visibility")
+
+        # --- TAB 1: PICKLISTS MANAGER ---
+        cat_bar = ctk.CTkFrame(tab_picklists, fg_color="transparent")
+        cat_bar.pack(fill="x", padx=15, pady=10)
+
+        ctk.CTkLabel(cat_bar, text="SELECT CATEGORY:", font=("Arial", 12, "bold"), text_color="#374151").pack(side="left", padx=(0, 10))
+        self.master_cat_var = ctk.StringVar(value="title")
+        
+        cats = [("Title", "title"), ("Member Type", "type"), ("REU Class", "reu_class"), ("Age Category", "age_category"), ("Area / Location", "area")]
+        for label, val in cats:
+            btn = ctk.CTkRadioButton(cat_bar, text=label, value=val, variable=self.master_cat_var,
+                                     font=("Arial", 12, "bold"), command=self.refresh_master_data_page)
+            btn.pack(side="left", padx=10)
+
+        # Add New Item Frame
+        add_f = ctk.CTkFrame(tab_picklists, fg_color="#F3F4F6", corner_radius=8)
+        add_f.pack(fill="x", padx=15, pady=10)
+        
+        self.master_new_item_e = ctk.CTkEntry(add_f, placeholder_text="Enter new item option value (e.g. Preacher, Preceptor)...", width=400, height=36)
+        self.master_new_item_e.pack(side="left", padx=15, pady=10, fill="x", expand=True)
+        self.master_new_item_e.bind("<Return>", lambda _: self.add_master_item())
+
+        ctk.CTkButton(add_f, text="➕ Add Option", font=("Arial", 12, "bold"), fg_color="#10B981", hover_color="#059669", height=36, width=130, command=self.add_master_item).pack(side="left", padx=15, pady=10)
+
+        # List Container
+        self.master_scroll = ctk.CTkScrollableFrame(tab_picklists, fg_color="transparent")
+        self.master_scroll.pack(fill="both", expand=True, padx=15, pady=10)
+
+        # --- TAB 2: REPORT COLUMN VISIBILITY ---
+        col_scroll = ctk.CTkScrollableFrame(tab_columns, fg_color="transparent")
+        col_scroll.pack(fill="both", expand=True, padx=15, pady=10)
+
+        ctk.CTkLabel(col_scroll, text="Select which fields are displayed in generated Reports & Exports:", font=("Arial", 14, "bold"), text_color="#1F2937").pack(anchor="w", pady=(5, 15))
+
+        self.col_vars = {}
+        report_cols = [
+            ("Title", "title", True),
+            ("REU Class (Religious Education)", "reu_class", True),
+            ("Member Code / ID", "member_code", True),
+            ("Member Type", "type", True),
+            ("Age / Date of Birth", "dob", True),
+            ("Parent / Member Phone Number", "phone", True),
+            ("Area / District", "area", True),
+            ("Home Address", "address", False),
+            ("Email Address", "email", False),
+            ("Date of Baptism", "baptism_date", False),
+            ("Has Holy Spirit Status", "has_holy_spirit", False),
+        ]
+
+        saved_cols = self.settings.get("report_visible_columns", {})
+
+        grid_f = ctk.CTkFrame(col_scroll, fg_color="#F9FAFB", border_width=1, border_color="#E5E7EB", corner_radius=8)
+        grid_f.pack(fill="x", pady=10, padx=5)
+
+        for i, (label, key, def_val) in enumerate(report_cols):
+            val = saved_cols.get(key, def_val)
+            v = ctk.BooleanVar(value=val)
+            self.col_vars[key] = v
+            chk = ctk.CTkCheckBox(grid_f, text=label, variable=v, font=("Arial", 13))
+            chk.grid(row=i//2, column=i%2, sticky="w", padx=30, pady=12)
+
+        ctk.CTkButton(col_scroll, text="💾 Save Column Preferences", font=("Arial", 13, "bold"),
+                      fg_color="#007BFF", hover_color="#0069D9", height=40, width=220,
+                      command=self.save_report_column_preferences).pack(anchor="w", pady=20, padx=5)
+
+    def refresh_master_data_page(self):
+        for w in self.master_scroll.winfo_children():
+            w.destroy()
+
+        cat = self.master_cat_var.get()
+        conn = sqlite3.connect("database/attendance.db")
+        rows = conn.execute("SELECT id, item_value, item_order FROM master_data WHERE category=? ORDER BY item_order ASC, id ASC", (cat,)).fetchall()
+        conn.close()
+
+        if not rows:
+            ctk.CTkLabel(self.master_scroll, text="No items found for this category. Add a new item above!", font=("Arial", 13, "italic"), text_color="#9CA3AF").pack(pady=30)
+            return
+
+        for item_id, item_val, item_order in rows:
+            row_f = ctk.CTkFrame(self.master_scroll, fg_color="#FFFFFF", border_width=1, border_color="#E5E7EB", corner_radius=6)
+            row_f.pack(fill="x", pady=4, padx=5)
+
+            ctk.CTkLabel(row_f, text=f"• {item_val}", font=("Arial", 14, "bold"), text_color="#1F2937").pack(side="left", padx=15, pady=10)
+
+            # Edit and Delete buttons
+            btn_box = ctk.CTkFrame(row_f, fg_color="transparent")
+            btn_box.pack(side="right", padx=10)
+
+            ctk.CTkButton(btn_box, text="✏️ Edit", width=75, height=28, fg_color="#F3F4F6", text_color="#374151", hover_color="#E5E7EB",
+                          command=lambda i=item_id, v=item_val, c=cat: self.edit_master_item(i, v, c)).pack(side="left", padx=4)
+
+            ctk.CTkButton(btn_box, text="🗑️ Delete", width=75, height=28, fg_color="#FEE2E2", text_color="#EF4444", hover_color="#FCA5A5",
+                          command=lambda i=item_id, v=item_val: self.delete_master_item(i, v)).pack(side="left", padx=4)
+
+    def add_master_item(self):
+        val = self.master_new_item_e.get().strip()
+        cat = self.master_cat_var.get()
+        if not val:
+            messagebox.showwarning("Warning", "Item value cannot be empty.")
+            return
+
+        conn = sqlite3.connect("database/attendance.db")
+        exists = conn.execute("SELECT 1 FROM master_data WHERE category=? AND item_value=? COLLATE NOCASE", (cat, val)).fetchone()
+        if exists:
+            conn.close()
+            messagebox.showwarning("Warning", f"'{val}' already exists in {cat.title()}.")
+            return
+
+        max_order = conn.execute("SELECT MAX(item_order) FROM master_data WHERE category=?", (cat,)).fetchone()[0] or 0
+        conn.execute("INSERT INTO master_data (category, item_value, item_order) VALUES (?, ?, ?)", (cat, val, max_order + 1))
+        conn.commit()
+        conn.close()
+
+        self.master_new_item_e.delete(0, "end")
+        self.refresh_master_data_page()
+        messagebox.showinfo("Success", f"Added '{val}' to {cat.title()}.")
+
+    def edit_master_item(self, item_id, old_val, category):
+        dialog = ctk.CTkInputDialog(text=f"Edit option value for {category.title()}:", title="Edit Master Option")
+        new_val = dialog.get_input()
+        if not new_val or not new_val.strip():
+            return
+        new_val = new_val.strip()
+        if new_val == old_val:
+            return
+
+        conn = sqlite3.connect("database/attendance.db")
+        conn.execute("UPDATE master_data SET item_value=? WHERE id=?", (new_val, item_id))
+        conn.commit()
+
+        # Ask to cascade update database records
+        if messagebox.askyesno("Cascade Update Database",
+                               f"Do you want to update all existing member records in the database from '{old_val}' to '{new_val}'?"):
+            col_map = {"title": "title", "type": "type", "reu_class": "reu_class", "age_category": "age_category", "area": "area"}
+            db_col = col_map.get(category)
+            if db_col:
+                conn.execute(f"UPDATE members SET {db_col}=? WHERE {db_col}=?", (new_val, old_val))
+                if db_col == "type":
+                    conn.execute("UPDATE attendance SET status=? WHERE status=?", (new_val, old_val))
+                conn.commit()
+                messagebox.showinfo("Updated", f"Successfully updated existing member database records to '{new_val}'.")
+
+        conn.close()
+        self.refresh_master_data_page()
+
+    def delete_master_item(self, item_id, item_val):
+        if messagebox.askyesno("Confirm Delete", f"Are you sure you want to delete '{item_val}' from master options?"):
+            conn = sqlite3.connect("database/attendance.db")
+            conn.execute("DELETE FROM master_data WHERE id=?", (item_id,))
+            conn.commit()
+            conn.close()
+            self.refresh_master_data_page()
+
+    def save_report_column_preferences(self):
+        saved_cols = {k: v.get() for k, v in self.col_vars.items()}
+        self.settings["report_visible_columns"] = saved_cols
+        self.save_settings()
+        messagebox.showinfo("Saved", "Report column preferences saved successfully!")
+
+    # ── REU Report Page ──────────────────────────────────────────────────────────
+    def init_reu_report_page(self):
+        f = ctk.CTkFrame(self.container, fg_color="#F8F9FA", corner_radius=10)
+        self.frames["reu_report"] = f
+
+        header_frame = ctk.CTkFrame(f, fg_color="transparent")
+        header_frame.pack(fill="x", padx=20, pady=(20, 10))
+
+        title_lbl = ctk.CTkLabel(header_frame, text="🏫 REU Attendance Report", font=("Arial", 28, "bold"), text_color="#1F2937")
+        title_lbl.pack(anchor="w")
+        sub_lbl = ctk.CTkLabel(header_frame, text="Religious Education Unit children attendance breakdown by class", font=("Arial", 14), text_color="#6B7280")
+        sub_lbl.pack(anchor="w")
+
+        # Toolbar Filters
+        toolbar = ctk.CTkFrame(f, fg_color="#FFFFFF", border_width=1, border_color="#E5E7EB", corner_radius=8)
+        toolbar.pack(fill="x", padx=20, pady=(10, 15))
+
+        filter_f = ctk.CTkFrame(toolbar, fg_color="transparent")
+        filter_f.pack(side="left", fill="x", expand=True, padx=15, pady=10)
+
+        # REU Class Selector
+        rc_f = ctk.CTkFrame(filter_f, fg_color="transparent")
+        rc_f.pack(side="left", padx=10)
+        ctk.CTkLabel(rc_f, text="REU CLASS", font=("Arial", 10, "bold"), text_color="#9CA3AF").pack(anchor="w")
+        self.reu_filter_var = ctk.StringVar(value="All REU")
+        reu_opts = ["All REU"] + self.get_master_options("reu_class", ["Junior Youth (JY)", "Upper Primary (UP)", "Lower Primary (LP)"])
+        self.reu_filter_cb = ctk.CTkComboBox(rc_f, variable=self.reu_filter_var, values=reu_opts, width=170)
+        self.reu_filter_cb.pack()
+
+        # From Date
+        f_d_f = ctk.CTkFrame(filter_f, fg_color="transparent")
+        f_d_f.pack(side="left", padx=10)
+        ctk.CTkLabel(f_d_f, text="FROM DATE", font=("Arial", 10, "bold"), text_color="#9CA3AF").pack(anchor="w")
+        fd_row = ctk.CTkFrame(f_d_f, fg_color="transparent")
+        fd_row.pack()
+        self.reu_from = ctk.CTkEntry(fd_row, width=100, placeholder_text="YYYY-MM-DD")
+        self.reu_from.pack(side="left")
+        ctk.CTkButton(fd_row, text="📅", width=30, height=28, fg_color="#F3F4F6", text_color="#374151", hover_color="#E5E7EB", command=lambda: self.open_report_date_picker(self.reu_from)).pack(side="left", padx=2)
+
+        # To Date
+        t_d_f = ctk.CTkFrame(filter_f, fg_color="transparent")
+        t_d_f.pack(side="left", padx=10)
+        ctk.CTkLabel(t_d_f, text="TO DATE", font=("Arial", 10, "bold"), text_color="#9CA3AF").pack(anchor="w")
+        td_row = ctk.CTkFrame(t_d_f, fg_color="transparent")
+        td_row.pack()
+        self.reu_to = ctk.CTkEntry(td_row, width=100, placeholder_text="YYYY-MM-DD")
+        self.reu_to.pack(side="left")
+        ctk.CTkButton(td_row, text="📅", width=30, height=28, fg_color="#F3F4F6", text_color="#374151", hover_color="#E5E7EB", command=lambda: self.open_report_date_picker(self.reu_to)).pack(side="left", padx=2)
+
+        ctk.CTkButton(filter_f, text="🔍 Search", width=100, height=36, fg_color="#007BFF", hover_color="#0069D9", font=("Arial", 13, "bold"), command=self.refresh_reu_report_page).pack(side="left", padx=15)
+
+        # Export Buttons
+        btn_f = ctk.CTkFrame(toolbar, fg_color="transparent")
+        btn_f.pack(side="right", padx=15, pady=10)
+        ctk.CTkButton(btn_f, text="⬇ Excel", width=90, height=36, fg_color="#D1FAE5", text_color="#10B981", hover_color="#A7F3D0", font=("Arial", 12, "bold"), command=self.export_reu_excel).pack(side="right", padx=4)
+        ctk.CTkButton(btn_f, text="📄 PDF", width=90, height=36, fg_color="#FEE2E2", text_color="#EF4444", hover_color="#FCA5A5", font=("Arial", 12, "bold"), command=self.export_reu_pdf).pack(side="right", padx=4)
+
+        # Summary Cards Container
+        self.reu_cards_f = ctk.CTkFrame(f, fg_color="transparent")
+        self.reu_cards_f.pack(fill="x", padx=20, pady=5)
+
+        # Data Table Container
+        self.reu_scroll = ctk.CTkScrollableFrame(f, fg_color="#FFFFFF", border_width=1, border_color="#E5E7EB", corner_radius=8)
+        self.reu_scroll.pack(fill="both", expand=True, padx=20, pady=(5, 20))
+
+    def refresh_reu_report_page(self):
+        for w in self.reu_cards_f.winfo_children(): w.destroy()
+        for w in self.reu_scroll.winfo_children(): w.destroy()
+
+        reu_cls = self.reu_filter_var.get()
+        f_date = self.reu_from.get().strip()
+        t_date = self.reu_to.get().strip()
+
+        conn = sqlite3.connect("database/attendance.db")
+
+        # Class breakdown statistics
+        c_query = """
+            SELECT m.reu_class, COUNT(a.id)
+            FROM attendance a
+            JOIN members m ON a.member_code = m.member_code
+            WHERE m.reu_class IS NOT NULL AND m.reu_class != '' AND m.reu_class != 'N/A'
+        """
+        params = []
+        if f_date: c_query += " AND a.service_date >= ?"; params.append(f_date)
+        if t_date: c_query += " AND a.service_date <= ?"; params.append(t_date)
+        c_query += " GROUP BY m.reu_class"
+
+        stats_rows = conn.execute(c_query, params).fetchall()
+        stats_dict = {r[0]: r[1] for r in stats_rows}
+
+        total_children = sum(stats_dict.values())
+
+        # Render 4 Summary Cards
+        card_items = [
+            ("🎒 Total REU Present", str(total_children), "#3B82F6", "#EFF6FF"),
+            ("👦 Junior Youth (JY)", str(stats_dict.get("Junior Youth (JY)", 0)), "#8B5CF6", "#F5F3FF"),
+            ("📘 Upper Primary (UP)", str(stats_dict.get("Upper Primary (UP)", 0)), "#10B981", "#ECFDF5"),
+            ("📗 Lower Primary (LP)", str(stats_dict.get("Lower Primary (LP)", 0)), "#F59E0B", "#FFFBEB"),
+        ]
+        for title, val, txt_c, bg_c in card_items:
+            card = ctk.CTkFrame(self.reu_cards_f, fg_color=bg_c, corner_radius=8, height=75)
+            card.pack(side="left", fill="both", expand=True, padx=6)
+            ctk.CTkLabel(card, text=title, font=("Arial", 12, "bold"), text_color=txt_c).pack(anchor="w", padx=15, pady=(10, 0))
+            ctk.CTkLabel(card, text=val, font=("Arial", 22, "bold"), text_color="#1F2937").pack(anchor="w", padx=15, pady=(0, 10))
+
+        # Attendance rows table
+        t_query = """
+            SELECT a.service_date, s.title, m.member_code, m.name, m.title, m.reu_class, m.phone, a.check_in_time
+            FROM attendance a
+            LEFT JOIN members m ON a.member_code = m.member_code
+            LEFT JOIN sessions s ON a.session_id = s.id
+            WHERE 1=1
+        """
+        t_params = []
+        if reu_cls and reu_cls != "All REU":
+            t_query += " AND COALESCE(m.reu_class, '') = ?"
+            t_params.append(reu_cls)
+        else:
+            t_query += " AND COALESCE(m.reu_class, '') != '' AND COALESCE(m.reu_class, '') != 'N/A'"
+
+        if f_date: t_query += " AND a.service_date >= ?"; t_params.append(f_date)
+        if t_date: t_query += " AND a.service_date <= ?"; t_params.append(t_date)
+
+        t_query += " ORDER BY a.service_date DESC, a.check_in_time ASC LIMIT 300"
+
+        rows = conn.execute(t_query, t_params).fetchall()
+        conn.close()
+
+        if not rows:
+            ctk.CTkLabel(self.reu_scroll, text="No REU attendance records found for selected criteria.", font=("Arial", 14, "italic"), text_color="#9CA3AF").pack(pady=40)
+            return
+
+        # Table Header
+        hdr = ctk.CTkFrame(self.reu_scroll, fg_color="#F3F4F6", corner_radius=4)
+        hdr.pack(fill="x", pady=(5, 10))
+
+        cols = [("DATE", 100), ("SESSION", 180), ("ID", 90), ("CHILD NAME", 180), ("REU CLASS", 150), ("PARENT PHONE", 120), ("CHECK-IN", 90)]
+        for lbl, w in cols:
+            ctk.CTkLabel(hdr, text=lbl, font=("Arial", 11, "bold"), text_color="#4B5563", width=w, anchor="w").pack(side="left", padx=8, pady=8)
+
+        for r in rows:
+            row_f = ctk.CTkFrame(self.reu_scroll, fg_color="#FFFFFF", corner_radius=4)
+            row_f.pack(fill="x", pady=2)
+
+            s_date, s_title, m_code, m_name, m_t, m_reu, m_phone, c_time = r
+
+            ctk.CTkLabel(row_f, text=str(s_date or ""), font=("Arial", 12), width=100, anchor="w").pack(side="left", padx=8, pady=6)
+            ctk.CTkLabel(row_f, text=str(s_title or "")[:24], font=("Arial", 12), width=180, anchor="w").pack(side="left", padx=8, pady=6)
+            ctk.CTkLabel(row_f, text=str(m_code or ""), font=("Arial", 12, "bold"), text_color="#007BFF", width=90, anchor="w").pack(side="left", padx=8, pady=6)
+
+            display_name = f"{m_t} {m_name}".strip() if m_t else m_name
+            ctk.CTkLabel(row_f, text=str(display_name)[:24], font=("Arial", 12, "bold"), width=180, anchor="w").pack(side="left", padx=8, pady=6)
+
+            badge = ctk.CTkLabel(row_f, text=str(m_reu or "N/A"), font=("Arial", 11, "bold"), fg_color="#E0E7FF", text_color="#4338CA", corner_radius=4, width=140, height=24)
+            badge.pack(side="left", padx=8, pady=6)
+
+            ctk.CTkLabel(row_f, text=str(m_phone or "--"), font=("Arial", 12), width=120, anchor="w").pack(side="left", padx=8, pady=6)
+            ctk.CTkLabel(row_f, text=str(c_time or "")[11:16], font=("Arial", 12), width=90, anchor="w").pack(side="left", padx=8, pady=6)
+
+    def export_reu_excel(self):
+        try:
+            from report import ReportGenerator
+            rg = ReportGenerator()
+            p = rg.generate_reu_excel(
+                reu_class=self.reu_filter_var.get(),
+                from_date=self.reu_from.get().strip() or None,
+                to_date=self.reu_to.get().strip() or None
+            )
+            messagebox.showinfo("Export Successful", f"REU Excel Report saved to:\n{p}")
+        except Exception as e:
+            messagebox.showerror("Export Error", f"Failed to export REU Excel report: {e}")
+
+    def export_reu_pdf(self):
+        try:
+            from report import ReportGenerator
+            rg = ReportGenerator()
+            p = rg.generate_reu_pdf(
+                reu_class=self.reu_filter_var.get(),
+                from_date=self.reu_from.get().strip() or None,
+                to_date=self.reu_to.get().strip() or None,
+                settings=self.settings
+            )
+            messagebox.showinfo("Export Successful", f"REU PDF Report saved to:\n{p}")
+        except Exception as e:
+            messagebox.showerror("Export Error", f"Failed to export REU PDF report: {e}")
 
 
 # ── WiFi Camera Network Discovery Helpers ───────────────────────────────────
