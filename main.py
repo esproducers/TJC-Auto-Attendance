@@ -19,7 +19,9 @@ COLOR_CYAN = (255, 255, 0) # BGR
 class InsightFaceAttendance:
     def __init__(self, camera_id=0, face_dir="registered_faces",
                  db_path="database/attendance.db",
-                 cache_file="cache/church_faces_insight.pkl"):
+                 cache_file="cache/church_faces_insight.pkl",
+                 process_width=640,        # 新增：处理宽度（自动缩放至此）
+                 flip_mode=0):             # 新增：画面方向修正 0=正常,1=水平镜像,2=垂直翻转,3=180°
         self.face_dir    = face_dir
         self.db_path     = db_path
         self.cache_file  = cache_file
@@ -32,28 +34,43 @@ class InsightFaceAttendance:
                   self.records_dir, self.unknown_dir, "reports"]:
             os.makedirs(d, exist_ok=True)
 
-        # Camera
+        # ---- 摄像头初始化（通用自适应） ----
         self.current_camera_id = camera_id
         self.camera = cv2.VideoCapture(self.current_camera_id)
-        try:
-            self.camera.set(cv2.CAP_PROP_FRAME_WIDTH,  1920)
-            self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
-        except Exception:
-            pass
+        if not self.camera.isOpened():
+            raise Exception("无法打开摄像头，请检查连接")
 
-        # InsightFace (Portable: root='./models' lets you keep the AI files in the project folder)
+        # 尝试强制 MJPEG 格式（提高帧率）
+        fourcc = cv2.VideoWriter_fourcc('M','J','P','G')
+        self.camera.set(cv2.CAP_PROP_FOURCC, fourcc)  # 不支持则自动忽略
+
+        # 获取实际分辨率（不强制设置）
+        w = int(self.camera.get(cv2.CAP_PROP_FRAME_WIDTH))
+        h = int(self.camera.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        print(f"[CAM] 摄像头默认分辨率: {w}x{h}")
+
+        # 设定处理宽度（所有输入图像都会缩放到此宽度再识别）
+        self.process_width = process_width
+        self.original_width = w
+        self.original_height = h
+
+        # 画面方向修正（应对倒装/镜像）
+        self.flip_mode = flip_mode
+
+        # InsightFace（加载模型，det_size 设为 320x320 加速）
         self.face_app = None
         self.is_prepared = False
         
-        # Initialize basic attributes to prevent crashes before preparation
+        # 基础属性
         self.active_session_id  = None
         self.session_captured_ids = set()
         self.session_captured_names = set()
         self.session_unknown_encodings = []
         self.pending_unknowns = {}
         self.frame_count = 0
-        self.process_every_n_frames = 5
-        # Bright light / doorway compensation state
+        self.process_every_n_frames = 5   # 每5帧处理一次（可根据性能调整）
+        
+        # 背光补偿模式（默认关闭）
         self.bright_light_mode = False
         self.bright_light_params = {
             "gain": 1.0,
@@ -61,20 +78,24 @@ class InsightFaceAttendance:
             "saturation": 1.0,
             "white_balance": 0.0
         }
+        
         self.known_face_encodings = []
         self.known_face_names = []
         self.known_face_ids = []
 
+    # ---------- 背光补偿（极速版） ----------
     def set_bright_light_mode(self, enabled: bool):
-        """Enable or disable software WDR bright background (doorway lighting) compensation."""
+        """启用/关闭背光补偿（同时尝试硬件调参）"""
         self.bright_light_mode = enabled
         if hasattr(self, 'camera') and self.camera and self.camera.isOpened():
             try:
-                # Maintain camera auto-exposure and auto-white-balance to preserve raw hardware color richness
-                self.camera.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.75) # DirectShow auto EV
-                self.camera.set(cv2.CAP_PROP_BRIGHTNESS, 128)
+                # 尝试关闭自动曝光，手动拉亮（不同摄像头兼容性不同）
+                self.camera.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)   # 手动模式
+                self.camera.set(cv2.CAP_PROP_BRIGHTNESS, 180)    # 提高亮度
+                self.camera.set(cv2.CAP_PROP_GAIN, 80)
+                print("[CAM] 已切换手动高亮模式（硬件调参）")
             except Exception as e:
-                print(f"[WARN] Hardware camera exposure control error: {e}")
+                print(f"[WARN] 摄像头不支持手动曝光: {e}")
 
     def set_bright_light_params(self, params: dict):
         """Update manual adjustment settings (gain, contrast, saturation, white_balance) for Bright Light WDR mode."""
@@ -83,113 +104,61 @@ class InsightFaceAttendance:
 
     def apply_smart_bright_light_compensation(self, frame):
         """
-        Smart WDR (Wide Dynamic Range) illumination & backlight compensation algorithm.
-        Lifts backlit human face & foreground shadows while strictly preserving vibrant,
-        natural colors and preventing overexposure of bright doorway/window backgrounds.
-        Supports manual fine-tuning for gain, contrast, saturation, and white balance.
+        极速通用背光补偿（仅处理亮度通道，速度极快）
+        在检测帧对小图调用，不占用主循环性能
         """
         if frame is None or not self.bright_light_mode:
             return frame
         try:
-            params = getattr(self, 'bright_light_params', {})
-            gain_val = float(params.get('gain', 1.0))
-            contrast_val = float(params.get('contrast', 1.0))
-            sat_val = float(params.get('saturation', 1.0))
-            wb_val = float(params.get('white_balance', 0.0))
-
-            # 1. Convert BGR to HSV color space for independent Hue, Saturation, Value processing
-            hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV).astype(np.float32)
+            # 转为 HSV，只调整 V（明度）通道
+            hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
             h, s, v = cv2.split(hsv)
             
-            # 2. Extract smooth local illumination map using Gaussian blur (Retinex illumination principle)
-            blur_ksize = max(31, (int(frame.shape[1] * 0.08) // 2) * 2 + 1)
-            illumination_map = cv2.GaussianBlur(v, (blur_ksize, blur_ksize), 0) / 255.0
+            # 如果整体偏暗（均值<80），做 Gamma 提亮
+            mean_val = np.mean(v)
+            if mean_val < 80:
+                v_float = v.astype(np.float32) / 255.0
+                gamma = 0.6   # 提亮系数（越小越亮）
+                v_corrected = np.power(v_float, gamma) * 255.0
+                v = np.clip(v_corrected, 0, 255).astype(np.uint8)
             
-            # 3. Calculate local dynamic shadow mask: 1.0 in deep shadows (backlit face), 0.0 in bright areas (doorway)
-            shadow_mask = 1.0 - illumination_map
-            
-            # Adaptive local gamma curve modulated by manual WDR Gain setting
-            v_norm = v / 255.0
-            gamma_map = 1.0 - (shadow_mask * 0.45 * gain_val)
-            v_lifted = np.power(v_norm, np.maximum(0.2, gamma_map)) * 255.0
-            
-            # Blend with controlled CLAHE on luminance to enhance sharp facial details
-            v_uint8 = np.clip(v_lifted, 0, 255).astype(np.uint8)
-            clahe = cv2.createCLAHE(clipLimit=1.8, tileGridSize=(8, 8))
-            v_clahe = clahe.apply(v_uint8).astype(np.float32)
-            
-            v_final = 0.65 * v_lifted + 0.35 * v_clahe
-            
-            # Apply manual Contrast adjustment on Value channel
-            if contrast_val != 1.0:
-                v_final = (v_final - 128.0) * contrast_val + 128.0
-            v_final = np.clip(v_final, 0, 255)
-            
-            # 4. COLOR PRESERVATION & SATURATION BOOST:
-            #    Proportionally boost saturation (S) in lifted shadow regions so skin & clothes retain full color
-            lum_gain = np.where(v > 1.0, v_final / (v + 1e-5), 1.0)
-            sat_boost_factor = np.power(lum_gain, 0.55)
-            s_final = s * sat_boost_factor
-            
-            # Protect & boost warm skin-tone hues (H in [0..25] or [165..180]) in shadow areas
-            skin_mask = (((h >= 0) & (h <= 25)) | ((h >= 165) & (h <= 180))).astype(np.float32)
-            s_final += skin_mask * shadow_mask * 15.0 * gain_val
-            
-            # Apply manual Saturation multiplier
-            if sat_val != 1.0:
-                s_final = s_final * sat_val
-            s_final = np.clip(s_final, 0, 255)
-            
-            # 5. Merge channels back and convert to BGR
-            enhanced_hsv = cv2.merge([h, s_final, v_final]).astype(np.uint8)
-            enhanced_bgr = cv2.cvtColor(enhanced_hsv, cv2.COLOR_HSV2BGR)
-            
-            # 6. Apply manual White Balance adjustment (Color Warmth / Tint)
-            if wb_val != 0.0:
-                bgr_float = enhanced_bgr.astype(np.float32)
-                wb_factor = wb_val / 100.0  # -0.5 to +0.5
-                if wb_factor > 0:
-                    # Warmer: boost Red, slightly reduce Blue
-                    bgr_float[:, :, 2] *= (1.0 + wb_factor * 0.4)
-                    bgr_float[:, :, 0] *= (1.0 - wb_factor * 0.2)
-                else:
-                    # Cooler: boost Blue, slightly reduce Red
-                    bgr_float[:, :, 0] *= (1.0 - wb_factor * 0.4)
-                    bgr_float[:, :, 2] *= (1.0 + wb_factor * 0.2)
-                enhanced_bgr = np.clip(bgr_float, 0, 255).astype(np.uint8)
-                
-            return enhanced_bgr
-        except Exception as e:
-            print(f"[WARN] Smart WDR bright light frame processing error: {e}")
+            enhanced = cv2.merge((h, s, v))
+            return cv2.cvtColor(enhanced, cv2.COLOR_HSV2BGR)
+        except Exception:
             return frame
 
+    # ---------- 摄像头切换 ----------
     def switch_camera(self, camera_id):
-        """Release current camera and open a new one."""
+        """切换摄像头（保留自适应逻辑）"""
         if hasattr(self, 'camera') and self.camera:
             self.camera.release()
         self.current_camera_id = camera_id
         self.camera = cv2.VideoCapture(self.current_camera_id)
-        try:
-            self.camera.set(cv2.CAP_PROP_FRAME_WIDTH,  1920)
-            self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
-        except Exception:
-            pass
-        if hasattr(self, 'bright_light_mode') and self.bright_light_mode:
+        if not self.camera.isOpened():
+            return False
+        fourcc = cv2.VideoWriter_fourcc('M','J','P','G')
+        self.camera.set(cv2.CAP_PROP_FOURCC, fourcc)
+        w = int(self.camera.get(cv2.CAP_PROP_FRAME_WIDTH))
+        h = int(self.camera.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        print(f"[CAM] 切换摄像头分辨率: {w}x{h}")
+        self.original_width = w
+        self.original_height = h
+        if self.bright_light_mode:
             self.set_bright_light_mode(True)
         return self.camera.isOpened()
 
-    def prepare(self, ctx_id=-1, det_size=(640, 640)):
-        """Prepare the FaceAnalysis app. Might download models if missing."""
+    # ---------- 准备模型 ----------
+    def prepare(self, ctx_id=-1, det_size=(320, 320)):   # det_size 改为 320
+        """初始化 InsightFace 模型（使用 320x320 加速）"""
         if self.face_app is None:
             self.face_app = insightface.app.FaceAnalysis(name='buffalo_l', root='./models')
-        self.face_app.prepare(ctx_id=ctx_id, det_size=det_size)
+        self.face_app.prepare(ctx_id=ctx_id, det_size=det_size)  # 不设 max_num，允许多人
         self.is_prepared = True
         
         self.known_face_encodings = []
         self.known_face_names     = []
         self.known_face_ids       = []
         self.load_known_faces()
-
         self.init_database()
 
     # ── Face cache ────────────────────────────────────────────────────────────
@@ -897,31 +866,55 @@ class InsightFaceAttendance:
         if name:
             self.session_captured_names.add(name.strip().lower())
 
-    # ── Frame processing ──────────────────────────────────────────────────────
+    # ── Frame processing (核心改动) ──────────────────────────────────────────
 
     def process_frame(self, frame):
-        """Returns (annotated_frame, list_of_result_dicts)"""
+        """返回 (annotated_frame, list_of_result_dicts)"""
         results = []
         if not self.is_prepared:
             return frame, results
 
+        # ===== 1. 画面方向修正（应对倒装/镜像） =====
+        if self.flip_mode == 1:
+            frame = cv2.flip(frame, 1)   # 水平镜像
+        elif self.flip_mode == 2:
+            frame = cv2.flip(frame, 0)   # 垂直翻转
+        elif self.flip_mode == 3:
+            frame = cv2.rotate(frame, cv2.ROTATE_180)
+
+        # ===== 2. 动态缩放到统一处理宽度 =====
+        h, w = frame.shape[:2]
+        if w != self.process_width:
+            scale = self.process_width / w
+            new_w = self.process_width
+            new_h = int(h * scale)
+            small = cv2.resize(frame, (new_w, new_h))
+        else:
+            scale = 1.0
+            small = frame
+
+        # ===== 3. 每隔 N 帧检测一次 =====
         if self.frame_count % self.process_every_n_frames == 0:
-            small = cv2.resize(frame, (0, 0), fx=0.5, fy=0.5)
+            # ---- 3a. 背光补偿（仅在小图上执行，极速） ----
+            if self.bright_light_mode:
+                small = self.apply_smart_bright_light_compensation(small)
+
+            # ---- 3b. 人脸检测（基于小图） ----
             faces = self.face_app.get(small)
 
             for face in faces:
                 embedding = face.embedding
                 best_dist, match_name, match_code = float('inf'), "Unknown", ""
 
-                # Matrix Vectorized Matching across all N face encodings simultaneously (100x faster)
+                # 矩阵向量化匹配（您原有的加速逻辑）
                 if hasattr(self, 'known_matrix') and len(self.known_matrix) > 0:
                     emb_norm = embedding / (np.linalg.norm(embedding) + 1e-9)
                     cos_sims = np.dot(self.known_matrix, emb_norm)
                     best_idx = np.argmax(cos_sims)
                     best_sim = cos_sims[best_idx]
                     dist = 1.0 - best_sim
-                    if dist < 0.4:
-                        best_dist  = dist
+                    if dist < 0.5:   # 阈值放宽至 0.5（通用性更好）
+                        best_dist = dist
                         match_name = self.known_face_names[best_idx]
                         match_code = self.known_face_ids[best_idx]
                 else:
@@ -929,90 +922,85 @@ class InsightFaceAttendance:
                         cos_sim = np.dot(embedding, enc) / (
                             np.linalg.norm(embedding) * np.linalg.norm(enc) + 1e-9)
                         dist = 1 - cos_sim
-                        if dist < best_dist and dist < 0.4:
-                            best_dist  = dist
+                        if dist < best_dist and dist < 0.5:
+                            best_dist = dist
                             match_name = self.known_face_names[i]
                             match_code = self.known_face_ids[i]
 
-                bbox = (face.bbox.astype(int) * 2).tolist()
+                # ---- 3c. 坐标还原到原图尺寸 ----
+                bbox = (face.bbox / scale).astype(int).tolist()
 
                 if match_name != "Unknown":
-                    # Fast in-memory metadata lookup (Zero SQL disk reads per frame!)
-                    meta    = getattr(self, 'known_member_meta', {}).get(match_code, {})
-                    m_type  = meta.get('type', 'area member')
+                    meta = getattr(self, 'known_member_meta', {}).get(match_code, {})
+                    m_type = meta.get('type', 'area member')
                     m_title = meta.get('title', '')
-
-                    # Always add to results for visual display
                     results.append({'name': match_name, 'code': match_code,
                                     'bbox': bbox, 'new': False,
                                     'img': None, 'type': m_type, 'title': m_title})
-
-                    # Only perform attendance marking if not yet captured this session
                     if match_code not in self.session_captured_ids:
                         new, img = self.mark_attendance(match_name, match_code, frame, m_type, bbox=bbox)
                         results[-1]['new'] = new
                         results[-1]['img'] = img
-                    
-                    # Prevent overlapping unknown captures for this recognized face
+                    # 清理重叠的未知待处理项
                     to_del = []
                     for uid, p in self.pending_unknowns.items():
                         pb = p['bbox']
-                        # Simple overlap check: center distance < box half-width
-                        dist = ((bbox[0]+bbox[2])/2 - (pb[0]+pb[2])/2)**2 + ((bbox[1]+bbox[3])/2 - (pb[1]+pb[3])/2)**2
-                        if dist < (max(bbox[2]-bbox[0], 50)**2):
+                        dist_center = ((bbox[0]+bbox[2])/2 - (pb[0]+pb[2])/2)**2 + ((bbox[1]+bbox[3])/2 - (pb[1]+pb[3])/2)**2
+                        if dist_center < (max(bbox[2]-bbox[0], 50)**2):
                             to_del.append(uid)
-                    for uid in to_del: del self.pending_unknowns[uid]
+                    for uid in to_del:
+                        del self.pending_unknowns[uid]
+
                 elif self.active_session_id:
-                    # 1. Check if already saved in this session
+                    # 未知人脸处理（保持原有逻辑）
                     is_saved = False
                     for u_enc in self.session_unknown_encodings:
                         sim = np.dot(embedding, u_enc) / (np.linalg.norm(embedding) * np.linalg.norm(u_enc) + 1e-9)
                         if (1 - sim) < 0.4:
-                            is_saved = True; break
-                    if is_saved: continue
+                            is_saved = True
+                            break
+                    if is_saved:
+                        continue
 
-                    # 2. Check pending buffer
                     target_uid = None
                     for uid, p in self.pending_unknowns.items():
                         sim = np.dot(embedding, p['enc']) / (np.linalg.norm(embedding) * np.linalg.norm(p['enc']) + 1e-9)
                         if (1 - sim) < 0.4:
-                            target_uid = uid; break
+                            target_uid = uid
+                            break
 
                     now = time.time()
                     if target_uid:
                         p = self.pending_unknowns[target_uid]
                         p['last_seen'] = now
-                        # Update best frame if current one is clearer (higher detection score)
                         if face.det_score > p['best_score']:
                             p['best_score'] = face.det_score
                             p['best_frame'] = frame.copy()
                             p['bbox'] = bbox
-                        
-                        # If seen for > 1.2s, trigger final capture
                         if now - p['first_seen'] > 1.2:
                             img = self.save_unknown(p['best_frame'], bbox=p['bbox'])
                             self.session_unknown_encodings.append(p['enc'])
-                            results.append({'name': 'Unknown', 'code': '', 'bbox': p['bbox'], 'new': True, 'img': img, 'type': 'unknown'})
+                            results.append({'name': 'Unknown', 'code': '', 'bbox': p['bbox'],
+                                            'new': True, 'img': img, 'type': 'unknown'})
                             del self.pending_unknowns[target_uid]
                     else:
-                        # New pending entry
                         uid = str(uuid.uuid4())
                         self.pending_unknowns[uid] = {
                             'enc': embedding, 'first_seen': now, 'last_seen': now,
-                            'best_score': face.det_score, 'best_frame': frame.copy(), 'bbox': bbox
+                            'best_score': face.det_score, 'best_frame': frame.copy(),
+                            'bbox': bbox
                         }
 
-        # Clean up stale unknowns (absent for > 2 seconds)
+        # 清理过期的未知待处理项
         now = time.time()
         self.pending_unknowns = {uid: p for uid, p in self.pending_unknowns.items() if now - p['last_seen'] < 2.0}
 
-        # Draw bounding boxes
+        # ===== 4. 在原图上绘制识别框 =====
         for r in results:
-            b     = r['bbox']
-            color = COLOR_CYAN
-            cv2.rectangle(frame, (b[0], b[1]), (b[2], b[3]), color, 2)
+            b = r['bbox']
+            cv2.rectangle(frame, (b[0], b[1]), (b[2], b[3]), COLOR_CYAN, 2)
             cv2.putText(frame, r['name'], (b[0], b[1] - 10),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, COLOR_CYAN, 2)
 
         self.frame_count += 1
         return frame, results
@@ -1216,3 +1204,38 @@ class InsightFaceAttendance:
             
         conn.close()
         return df
+
+    # ---------- 运行循环 ----------
+    def run(self):
+        """简单运行循环，按 q 退出"""
+        print("按 'q' 退出，按 's' 保存当前画面")
+        while True:
+            ret, frame = self.camera.read()
+            if not ret:
+                print("摄像头读取失败")
+                break
+            annotated, _ = self.process_frame(frame)
+            cv2.imshow('Church Attendance', annotated)
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord('q'):
+                break
+            elif key == ord('s'):
+                cv2.imwrite(f"capture_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg", frame)
+                print("画面已保存")
+        self.camera.release()
+        cv2.destroyAllWindows()
+
+
+if __name__ == "__main__":
+    # 实例化系统（可指定 process_width 和 flip_mode）
+    system = InsightFaceAttendance(process_width=640, flip_mode=0)
+    system.prepare(det_size=(320, 320))   # 关键：det_size 改为 320
+    if len(system.known_face_encodings) == 0:
+        print("请将会众照片放入 registered_faces 文件夹后重新运行。")
+    else:
+        # 如果门口背光严重，可启用背光补偿（根据实际情况决定）
+        # system.set_bright_light_mode(True)
+        try:
+            system.run()
+        except KeyboardInterrupt:
+            print("\n程序已退出")
