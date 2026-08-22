@@ -866,6 +866,79 @@ class InsightFaceAttendance:
         if name:
             self.session_captured_names.add(name.strip().lower())
 
+    # ── Strict Unknown Quality Filter ─────────────────────────────────────────
+
+    def is_quality_unknown_face(self, face, frame_w, frame_h, frame=None):
+        """
+        Strict quality filter for UNKNOWN face capture to prevent blurry, half, cut-off,
+        or poor quality faces from cluttering the 'Waiting Recognition' list.
+        
+        Rules:
+        1. High detection confidence: face.det_score >= 0.68
+        2. Sufficient face size: width and height >= 70 pixels
+        3. Full face (no cut-offs at borders): margins >= 20px from frame edges
+        4. Frontal pose check: keypoints symmetry (eyes, nose, mouth present & inside box)
+        5. Blur check: Laplacian variance >= 45.0 (if frame provided)
+        """
+        if face is None:
+            return False
+
+        # Rule 1: High detection score (ignore low confidence/blurry/side-profile detections)
+        det_score = getattr(face, 'det_score', 0.0)
+        if det_score < 0.68:
+            return False
+
+        # Rule 2 & 3: Border cut-off and face size check (on full frame resolution)
+        bbox = face.bbox.astype(int) # [x1, y1, x2, y2]
+        scale = frame_w / self.process_width if hasattr(self, 'process_width') and self.process_width > 0 else 1.0
+        x1, y1, x2, y2 = (bbox * scale).astype(int)
+
+        w = x2 - x1
+        h = y2 - y1
+
+        # Minimum size requirement for a clear face (reject tiny background faces)
+        if w < 70 or h < 70:
+            return False
+
+        # Border margin check: Reject half-faces / cut-off faces at edge of camera view
+        margin = 20
+        if x1 <= margin or y1 <= margin or x2 >= (frame_w - margin) or y2 >= (frame_h - margin):
+            return False
+
+        # Rule 4: Facial Keypoints Pose Check (Ensure full frontal face with 2 eyes, nose, mouth visible)
+        if hasattr(face, 'kps') and face.kps is not None and len(face.kps) == 5:
+            kps = face.kps * scale
+            left_eye, right_eye, nose, left_mouth, right_mouth = kps
+            
+            # Check all 5 keypoints are inside the bounding box
+            for pt in [left_eye, right_eye, nose, left_mouth, right_mouth]:
+                if not (x1 <= pt[0] <= x2 and y1 <= pt[1] <= y2):
+                    return False
+            
+            # Eye distance check (ensure face is not severely turned sideways)
+            eye_dist = np.linalg.norm(right_eye - left_eye)
+            if eye_dist < (w * 0.25):
+                return False
+
+        # Rule 5: Blur check (Laplacian variance) on face crop
+        if frame is not None:
+            try:
+                cx1 = max(0, x1)
+                cy1 = max(0, y1)
+                cx2 = min(frame_w, x2)
+                cy2 = min(frame_h, y2)
+                
+                face_crop = frame[cy1:cy2, cx1:cx2]
+                if face_crop.size > 0:
+                    gray_crop = cv2.cvtColor(face_crop, cv2.COLOR_BGR2GRAY)
+                    lap_var = cv2.Laplacian(gray_crop, cv2.CV_64F).var()
+                    if lap_var < 45.0: # Below 45 is considered out of focus or blurry
+                        return False
+            except Exception:
+                pass
+
+        return True
+
     # ── Frame processing (核心改动) ──────────────────────────────────────────
 
     def process_frame(self, frame):
@@ -952,7 +1025,11 @@ class InsightFaceAttendance:
                         del self.pending_unknowns[uid]
 
                 elif self.active_session_id:
-                    # 未知人脸处理（保持原有逻辑）
+                    # 严格人脸质量过滤：忽略半脸、边缘切边、模糊脸、低置信度脸
+                    if not self.is_quality_unknown_face(face, w, h, frame=frame):
+                        continue
+
+                    # 未知人脸处理
                     is_saved = False
                     for u_enc in self.session_unknown_encodings:
                         sim = np.dot(embedding, u_enc) / (np.linalg.norm(embedding) * np.linalg.norm(u_enc) + 1e-9)
