@@ -88,6 +88,7 @@ import time
 import calendar
 import uuid
 import concurrent.futures
+import ctypes
 from PIL import Image
 from datetime import datetime, date, timedelta
 from main import InsightFaceAttendance
@@ -97,6 +98,21 @@ from tkinter import filedialog, messagebox
 
 ctk.set_appearance_mode("Light")
 ctk.set_default_color_theme("blue")
+
+# Patch CustomTkinter CTkToplevel titlebar color callback on Windows to avoid 'bad window path name' error
+try:
+    import customtkinter.windows.widgets.ctk_toplevel as ctk_top
+    if hasattr(ctk_top.CTkToplevel, "_revert_withdraw_after_windows_set_titlebar_color"):
+        _orig_revert_cb = ctk_top.CTkToplevel._revert_withdraw_after_windows_set_titlebar_color
+        def _safe_revert_cb(self, *args, **kwargs):
+            try:
+                if self.winfo_exists():
+                    _orig_revert_cb(self, *args, **kwargs)
+            except Exception:
+                pass
+        ctk_top.CTkToplevel._revert_withdraw_after_windows_set_titlebar_color = _safe_revert_cb
+except Exception:
+    pass
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -508,12 +524,33 @@ class AutoAttendanceApp(ctk.CTk):
         # Update README with admin info
         self._update_readme_admin()
 
+    def hide_console_window(self):
+        """Hides the Windows terminal window after GUI launch to prevent accidental closing."""
+        if sys.platform == "win32":
+            try:
+                hwnd = ctypes.windll.kernel32.GetConsoleWindow()
+                if hwnd != 0:
+                    ctypes.windll.user32.ShowWindow(hwnd, 0) # 0 = SW_HIDE
+            except Exception:
+                pass
+
+    def show_console_window(self):
+        """Shows the Windows terminal window if needed for debugging."""
+        if sys.platform == "win32":
+            try:
+                hwnd = ctypes.windll.kernel32.GetConsoleWindow()
+                if hwnd != 0:
+                    ctypes.windll.user32.ShowWindow(hwnd, 5) # 5 = SW_SHOW
+            except Exception:
+                pass
+
     def initialize_face_engine(self):
         """Attempts to load AI models, asking for temporary internet access if they are missing."""
         try:
             # First attempt: With firewall active
             self.backend.prepare()
             print("[INFO] AI Engine initialized successfully (Offline).")
+            self.after(300, self.hide_console_window)
         except Exception as e:
             print(f"[WARN] AI Engine failed to initialize: {e}")
             # If it failed, it might be due to missing models needing download
@@ -732,18 +769,36 @@ class AutoAttendanceApp(ctk.CTk):
 
     def on_camera_change(self, choice):
         try:
+            prev_cam_id = getattr(self.backend, 'current_camera_id', 0)
+
             if choice.startswith("WiFi Camera: "):
                 cam_id = choice.replace("WiFi Camera: ", "").strip()
             elif choice.startswith("Camera "):
-                cam_id = int(choice.split()[-1])
+                try:
+                    cam_id = int(choice.split()[-1])
+                except ValueError:
+                    cam_id = choice
             else:
                 cam_id = choice
-            
+
+            # If already active, no need to re-open
+            if cam_id == prev_cam_id and hasattr(self.backend, 'camera') and self.backend.camera and self.backend.camera.isOpened():
+                return
+
             success = self.backend.switch_camera(cam_id)
             if not success:
-                messagebox.showerror("Error", f"Failed to open {choice}")
+                messagebox.showerror("Camera Connection Error",
+                                     f"Failed to open video stream: {choice}\n\n"
+                                     f"Please check if the WiFi camera is powered on and connected to the same network.")
+                # Revert dropdown selection to previous working camera
+                if isinstance(prev_cam_id, str) and prev_cam_id.startswith(("rtsp://", "http://", "https://")):
+                    self.cam_var.set(f"WiFi Camera: {prev_cam_id}")
+                else:
+                    self.cam_var.set(f"Camera {prev_cam_id}")
+                # Attempt restoring previous camera
+                self.backend.switch_camera(prev_cam_id)
             else:
-                print(f"[INFO] Switched to {choice}")
+                print(f"[INFO] Successfully switched camera to {choice}")
                 if hasattr(self, 'bright_var'):
                     self.backend.set_bright_light_mode(self.bright_var.get())
                 self.settings["last_camera_id"] = cam_id
@@ -4130,56 +4185,120 @@ class AutoAttendanceApp(ctk.CTk):
             return
 
         dialog = ctk.CTkToplevel(self)
-        dialog.title("Manual Add Attendee")
-        dialog.geometry("450x540")
+        dialog.title("Manual Add Attendees")
+        dialog.geometry("500x600")
         dialog.attributes("-topmost", True)
 
-        ctk.CTkLabel(dialog, text="Select Member to Add:", font=("Arial", 16, "bold"), text_color="#1F2937").pack(pady=(15, 5))
+        ctk.CTkLabel(dialog, text="Select Members to Add:", font=("Arial", 16, "bold"), text_color="#1F2937").pack(pady=(15, 5))
         
-        s_entry = ctk.CTkEntry(dialog, placeholder_text="Search member name or code...", height=36)
-        s_entry.pack(fill="x", padx=20, pady=(5, 5))
+        # Search Entry & Select All row
+        top_ctrl = ctk.CTkFrame(dialog, fg_color="transparent")
+        top_ctrl.pack(fill="x", padx=20, pady=(5, 5))
 
-        info_lbl = ctk.CTkLabel(dialog, text="Showing top matches (type to filter)", font=("Arial", 10, "italic"), text_color="gray")
+        s_entry = ctk.CTkEntry(top_ctrl, placeholder_text="Search member name or code...", height=36)
+        s_entry.pack(side="left", fill="x", expand=True, padx=(0, 10))
+
+        select_all_var = tk.BooleanVar(value=False)
+        
+        info_lbl = ctk.CTkLabel(dialog, text="Type to search or tick checkboxes to multi-select", font=("Arial", 10, "italic"), text_color="gray")
         info_lbl.pack(pady=(0, 5))
 
         list_f = ctk.CTkScrollableFrame(dialog, fg_color="#F9FAFB", corner_radius=8)
-        list_f.pack(fill="both", expand=True, padx=20, pady=(0, 15))
+        list_f.pack(fill="both", expand=True, padx=20, pady=(0, 10))
+
+        # Bottom Bar for Bulk Action
+        bottom_bar = ctk.CTkFrame(dialog, fg_color="transparent")
+        bottom_bar.pack(fill="x", padx=20, pady=(5, 15))
+
+        item_checkboxes = {} # member_code -> (BooleanVar, name, type)
+
+        def update_batch_btn_text():
+            count = sum(1 for var, _, _ in item_checkboxes.values() if var.get())
+            add_batch_btn.configure(text=f"➕ Add Selected Members ({count})")
+
+        def toggle_select_all():
+            val = select_all_var.get()
+            for var, _, _ in item_checkboxes.values():
+                var.set(val)
+            update_batch_btn_text()
+
+        select_all_cb = ctk.CTkCheckBox(top_ctrl, text="Select All", variable=select_all_var, font=("Arial", 11, "bold"), command=toggle_select_all)
+        select_all_cb.pack(side="right")
 
         def populate_list():
             for w in list_f.winfo_children():
                 w.destroy()
+            item_checkboxes.clear()
+            select_all_var.set(False)
+
             q = s_entry.get().lower().strip()
             
             conn = sqlite3.connect("database/attendance.db")
-            # Exclude those already present in this session, limit results to top 50 to prevent UI lag
+            # Exclude those already present in this session
+            # IS NOT NULL prevents NULL member_code from ruining SQL NOT IN
             members = conn.execute("""
-                SELECT member_code, name, type FROM members 
-                WHERE member_code NOT IN (SELECT member_code FROM attendance WHERE session_id=?)
+                SELECT member_code, name, type, title FROM members 
+                WHERE member_code NOT IN (
+                    SELECT member_code FROM attendance 
+                    WHERE session_id=? AND member_code IS NOT NULL
+                )
                 AND (LOWER(name) LIKE ? OR LOWER(member_code) LIKE ?)
                 ORDER BY name ASC
-                LIMIT 50
+                LIMIT 100
             """, (self.backend.active_session_id, f"%{q}%", f"%{q}%")).fetchall()
             conn.close()
 
             if not members:
                 ctk.CTkLabel(list_f, text="No eligible members found.", font=("Arial", 12), text_color="gray").pack(pady=20)
                 info_lbl.configure(text="No matches found.")
+                update_batch_btn_text()
                 return
 
             info_lbl.configure(text=f"Showing top {len(members)} match(es)")
 
-            for code, name, mtype in members:
-                item_f = ctk.CTkFrame(list_f, fg_color="#FFFFFF", height=42, corner_radius=6, border_width=1, border_color="#E5E7EB")
+            for code, name, mtype, title in members:
+                item_f = ctk.CTkFrame(list_f, fg_color="#FFFFFF", height=44, corner_radius=6, border_width=1, border_color="#E5E7EB")
                 item_f.pack(fill="x", pady=2)
                 item_f.pack_propagate(False)
 
-                lbl_text = f"👤  {name} ({code})"
-                ctk.CTkLabel(item_f, text=lbl_text, font=("Arial", 11, "bold"), text_color="#1F2937", anchor="w").pack(side="left", padx=10)
+                cb_var = tk.BooleanVar(value=False)
+                item_checkboxes[code] = (cb_var, name, mtype)
 
-                add_btn = ctk.CTkButton(item_f, text="➕ Add", width=70, height=28, font=("Arial", 10, "bold"),
+                cb = ctk.CTkCheckBox(item_f, text="", variable=cb_var, width=20, command=update_batch_btn_text)
+                cb.pack(side="left", padx=(10, 5))
+
+                disp_title = f"{title} " if title else ""
+                lbl_text = f"👤  {disp_title}{name} ({code})"
+                ctk.CTkLabel(item_f, text=lbl_text, font=("Arial", 11, "bold"), text_color="#1F2937", anchor="w").pack(side="left", padx=5)
+
+                add_btn = ctk.CTkButton(item_f, text="➕ Add", width=65, height=28, font=("Arial", 10, "bold"),
                                         fg_color="#28A745", hover_color="#218838", text_color="white",
-                                        command=lambda c=code, n=name, t=mtype: [self.do_manual_mark(c, n, t), dialog.destroy()])
+                                        command=lambda c=code, n=name, t=mtype: [self.do_manual_mark(c, n, t), populate_list()])
                 add_btn.pack(side="right", padx=8)
+
+            update_batch_btn_text()
+
+        def add_batch_selected():
+            selected = [(code, n, t) for code, (var, n, t) in item_checkboxes.items() if var.get()]
+            if not selected:
+                messagebox.showwarning("No Selection", "Please select at least one member using the checkboxes.", parent=dialog)
+                return
+            
+            added_count = 0
+            for code, n, t in selected:
+                ok = self.do_manual_mark(code, n, t)
+                if ok: added_count += 1
+            
+            messagebox.showinfo("Success", f"Successfully added {added_count} member(s) to attendance!", parent=dialog)
+            populate_list()
+
+        add_batch_btn = ctk.CTkButton(bottom_bar, text="➕ Add Selected Members (0)", height=40, font=("Arial", 12, "bold"),
+                                      fg_color="#10B981", hover_color="#059669", command=add_batch_selected)
+        add_batch_btn.pack(side="left", fill="x", expand=True, padx=(0, 5))
+
+        close_btn = ctk.CTkButton(bottom_bar, text="Done", width=90, height=40, font=("Arial", 12),
+                                  fg_color="#F3F4F6", text_color="#374151", hover_color="#E5E7EB", command=dialog.destroy)
+        close_btn.pack(side="right")
 
         s_entry.bind("<KeyRelease>", lambda e: populate_list())
         populate_list()
@@ -4201,8 +4320,10 @@ class AutoAttendanceApp(ctk.CTk):
         if ok:
             self.refresh_stats()
             self.activity_log.insert("1.0", f"[{datetime.now().strftime('%H:%M')}] ✅ {m_title} {name} (MANUAL)\n")
-            # Card addition
-            self.add_attendee_card(name, p_img, mtype, code, title=m_title)
+            # Update Captured list
+            self.refresh_captured_attendees_list()
+            return True
+        return False
 
     # ── Thread-Safe GUI Updates ───────────────────────────────────────────────
 
@@ -4223,7 +4344,7 @@ class AutoAttendanceApp(ctk.CTk):
 
         dialog = ctk.CTkToplevel(self)
         dialog.title("Remove Attendee from Session")
-        dialog.geometry("450x540")
+        dialog.geometry("480x580")
         dialog.attributes("-topmost", True)
 
         ctk.CTkLabel(dialog, text="Current Session Attendees:", font=("Arial", 16, "bold"), text_color="#DC2626").pack(pady=(15, 5))
@@ -4245,12 +4366,13 @@ class AutoAttendanceApp(ctk.CTk):
             conn = sqlite3.connect("database/attendance.db")
             # Fetch members present in active session
             present_members = conn.execute("""
-                SELECT a.member_code, a.name, m.type, m.title
+                SELECT a.member_code, COALESCE(m.name, a.person_name, 'Unknown') AS name,
+                       COALESCE(m.type, a.status, 'Member') AS mtype, m.title
                 FROM attendance a
                 LEFT JOIN members m ON a.member_code = m.member_code
-                WHERE a.session_id = ?
-                AND (LOWER(a.name) LIKE ? OR LOWER(a.member_code) LIKE ?)
-                ORDER BY a.name ASC
+                WHERE a.session_id = ? AND a.member_code IS NOT NULL
+                AND (LOWER(COALESCE(m.name, a.person_name, '')) LIKE ? OR LOWER(COALESCE(a.member_code, '')) LIKE ?)
+                ORDER BY name ASC
             """, (self.backend.active_session_id, f"%{q}%", f"%{q}%")).fetchall()
             conn.close()
 
@@ -4259,10 +4381,10 @@ class AutoAttendanceApp(ctk.CTk):
                 info_lbl.configure(text="No matching attendees.")
                 return
 
-            info_lbl.configure(text=f"Total {len(present_members)} attendee(s) present")
+            info_lbl.configure(text=f"Total {len(present_members)} attendee(s) present in current session")
 
             for code, name, mtype, title in present_members:
-                item_f = ctk.CTkFrame(list_f, fg_color="#FFFFFF", height=42, corner_radius=6, border_width=1, border_color="#E5E7EB")
+                item_f = ctk.CTkFrame(list_f, fg_color="#FFFFFF", height=44, corner_radius=6, border_width=1, border_color="#E5E7EB")
                 item_f.pack(fill="x", pady=2)
                 item_f.pack_propagate(False)
 
@@ -4276,25 +4398,62 @@ class AutoAttendanceApp(ctk.CTk):
                 rem_btn.pack(side="right", padx=8)
 
         def execute_removal(code, name):
-            if messagebox.askyesno("Confirm Removal", f"Remove '{name}' ({code}) from the current session?"):
+            if messagebox.askyesno("Confirm Removal", f"Remove '{name}' ({code}) from the current session?", parent=dialog):
                 conn = sqlite3.connect("database/attendance.db")
                 conn.execute("DELETE FROM attendance WHERE session_id=? AND member_code=?", (self.backend.active_session_id, code))
                 conn.commit()
                 conn.close()
 
-                # Remove from dashboard UI card list
-                for card in self.checkin_scroll.winfo_children():
-                    if hasattr(card, "member_code") and card.member_code == code:
-                        card.destroy()
+                # Remove from backend tracking so they can be captured again if needed
+                if hasattr(self.backend, "session_captured_ids"):
+                    self.backend.session_captured_ids.discard(code)
+                if hasattr(self.backend, "session_captured_names"):
+                    self.backend.session_captured_names.discard(name.strip().lower())
 
+                # Refresh stats and dashboard captured list
                 self.refresh_stats()
-                messagebox.showinfo("Removed", f"{name} ({code}) has been removed from this session.")
+                self.refresh_captured_attendees_list()
+                
+                messagebox.showinfo("Removed", f"{name} ({code}) has been removed from this session.", parent=dialog)
                 populate_present_list()
 
         s_entry.bind("<KeyRelease>", lambda e: populate_present_list())
         populate_present_list()
 
-    def add_attendee_card(self, name, img_path, m_type, code, title=""):
+    def refresh_captured_attendees_list(self):
+        if not hasattr(self, "checkin_scroll"): return
+        for w in self.checkin_scroll.winfo_children():
+            w.destroy()
+
+        if not hasattr(self.backend, "active_session_id") or not self.backend.active_session_id:
+            return
+
+        conn = sqlite3.connect("database/attendance.db")
+        rows = conn.execute("""
+            SELECT a.member_code, COALESCE(m.name, a.person_name, 'Unknown') AS name,
+                   a.record_image, COALESCE(m.type, a.status, 'Member') AS mtype,
+                   m.title, a.check_in_time
+            FROM attendance a
+            LEFT JOIN members m ON a.member_code = m.member_code
+            WHERE a.session_id = ? AND a.member_code IS NOT NULL
+            ORDER BY a.check_in_time DESC
+        """, (self.backend.active_session_id,)).fetchall()
+        conn.close()
+
+        for code, name, img_path, mtype, title, check_in_time in rows:
+            t_str = ""
+            if check_in_time:
+                try:
+                    t_str = datetime.strptime(str(check_in_time)[:19], "%Y-%m-%d %H:%M:%S").strftime("%I:%M %p")
+                except Exception:
+                    t_str = str(check_in_time)[11:16]
+            self.add_attendee_card(name, img_path, mtype, code, title=title if title else "", check_in_time=t_str)
+
+        # Apply search filter if active
+        if hasattr(self, "dash_search") and self.dash_search.get().strip():
+            self.filter_captured_list()
+
+    def add_attendee_card(self, name, img_path, m_type, code, title="", check_in_time=None):
         # Prevent duplicates
         for child in self.checkin_scroll.winfo_children():
             if hasattr(child, "member_code") and child.member_code == code:
@@ -4311,7 +4470,7 @@ class AutoAttendanceApp(ctk.CTk):
         img_f.pack(side="left", padx=10, pady=5)
         img_f.pack_propagate(False)
         
-        img_lbl = ctk.CTkLabel(img_f, text="📷", font=("Arial", 16))
+        img_lbl = ctk.CTkLabel(img_f, text="👤", font=("Arial", 16))
         img_lbl.pack(expand=True)
         if img_path and os.path.exists(img_path):
             try:
@@ -4324,8 +4483,9 @@ class AutoAttendanceApp(ctk.CTk):
         txt_f = ctk.CTkFrame(card, fg_color="transparent")
         txt_f.pack(side="left", fill="both", expand=True, padx=5)
         
-        ctk.CTkLabel(txt_f, text=name.upper(), font=("Arial", 12, "bold"), anchor="w").pack(pady=(8, 0), fill="x")
-        ctk.CTkLabel(txt_f, text=f"ID: {code}  |  {title}", font=("Arial", 10), text_color="#6B7280", anchor="w").pack(fill="x")
+        disp_name = f"{title} {name}" if title else name
+        ctk.CTkLabel(txt_f, text=disp_name.upper(), font=("Arial", 12, "bold"), anchor="w").pack(pady=(8, 0), fill="x")
+        ctk.CTkLabel(txt_f, text=f"ID: {code}", font=("Arial", 10), text_color="#6B7280", anchor="w").pack(fill="x")
 
         # [3] Status and Time
         right_f = ctk.CTkFrame(card, fg_color="transparent")
@@ -4335,11 +4495,11 @@ class AutoAttendanceApp(ctk.CTk):
         b_color = badge_colors.get(m_type.lower(), "#10B981")
         ctk.CTkLabel(right_f, text=m_type.upper(), font=("Arial", 8, "bold"), fg_color=b_color, text_color="white", corner_radius=4, width=80).pack(pady=(8, 2))
         
-        now_t = datetime.now().strftime("%I:%M %p")
+        now_t = check_in_time if check_in_time else datetime.now().strftime("%I:%M %p")
         ctk.CTkLabel(right_f, text=now_t, font=("Arial", 9), text_color="#9CA3AF").pack()
 
         # Store metadata for robust searching
-        card._search_data = f"{name} {code}".lower()
+        card._search_data = f"{name} {code} {title}".lower()
         return card
 
     # ── Camera Loop ───────────────────────────────────────────────────────────

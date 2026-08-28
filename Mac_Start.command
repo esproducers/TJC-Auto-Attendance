@@ -7,4 +7,6 @@ if [ ! -d "venv" ]; then
 fi
 echo "Starting Auto-Attendance System..."
 source venv/bin/activate
-python3 app.py
+nohup python3 app.py >/dev/null 2>&1 &
+osascript -e 'tell application "Terminal" to close first window' &
+exit

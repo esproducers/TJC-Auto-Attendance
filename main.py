@@ -17,6 +17,39 @@ from PIL import Image
 COLOR_CYAN = (255, 255, 0) # BGR
 
 class InsightFaceAttendance:
+    def _create_video_capture(self, source):
+        """
+        Creates a VideoCapture object supporting integer camera IDs (local USB webcams)
+        and string URLs (RTSP / HTTP WiFi IP cameras) with optimized network flags.
+        """
+        if isinstance(source, str) and source.isdigit():
+            source = int(source)
+
+        if isinstance(source, str):
+            # Enforce TCP transport for RTSP streams to eliminate UDP packet drops/corruption
+            os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_flags;tcp"
+
+            # Attempt 1: Direct capture
+            cap = cv2.VideoCapture(source)
+            if cap.isOpened():
+                return cap
+
+            # Attempt 2: Force FFmpeg backend
+            cap = cv2.VideoCapture(source, cv2.CAP_FFMPEG)
+            if cap.isOpened():
+                return cap
+
+            # Attempt 3: Strip default port :554 if present
+            if ":554" in source:
+                alt_url = source.replace(":554", "")
+                cap = cv2.VideoCapture(alt_url, cv2.CAP_FFMPEG)
+                if cap.isOpened():
+                    return cap
+
+            return cap
+        else:
+            return cv2.VideoCapture(source)
+
     def __init__(self, camera_id=0, face_dir="registered_faces",
                  db_path="database/attendance.db",
                  cache_file="cache/church_faces_insight.pkl",
@@ -34,20 +67,29 @@ class InsightFaceAttendance:
                   self.records_dir, self.unknown_dir, "reports"]:
             os.makedirs(d, exist_ok=True)
 
-        # ---- 摄像头初始化（通用自适应） ----
+        # ---- Camera Initialization (Supports USB Webcams & RTSP/WiFi Streams) ----
         self.current_camera_id = camera_id
-        self.camera = cv2.VideoCapture(self.current_camera_id)
+        self.camera = self._create_video_capture(camera_id)
         if not self.camera.isOpened():
-            raise Exception("无法打开摄像头，请检查连接")
+            print(f"[WARN] Unable to open initial camera stream: {camera_id}")
 
-        # 尝试强制 MJPEG 格式（提高帧率）
-        fourcc = cv2.VideoWriter_fourcc('M','J','P','G')
-        self.camera.set(cv2.CAP_PROP_FOURCC, fourcc)  # 不支持则自动忽略
+        # Only apply MJPEG fourcc to local USB cameras
+        if isinstance(camera_id, int) or (isinstance(camera_id, str) and camera_id.isdigit()):
+            try:
+                fourcc = cv2.VideoWriter_fourcc('M','J','P','G')
+                self.camera.set(cv2.CAP_PROP_FOURCC, fourcc)
+            except Exception:
+                pass
 
-        # 获取实际分辨率（不强制设置）
-        w = int(self.camera.get(cv2.CAP_PROP_FRAME_WIDTH))
-        h = int(self.camera.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        print(f"[CAM] 摄像头默认分辨率: {w}x{h}")
+        try:
+            w = int(self.camera.get(cv2.CAP_PROP_FRAME_WIDTH))
+            h = int(self.camera.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            if w <= 0 or h <= 0:
+                w, h = 640, 480
+        except Exception:
+            w, h = 640, 480
+
+        print(f"[CAM] Camera Resolution: {w}x{h}")
 
         # 设定处理宽度（所有输入图像都会缩放到此宽度再识别）
         self.process_width = process_width
@@ -83,19 +125,12 @@ class InsightFaceAttendance:
         self.known_face_names = []
         self.known_face_ids = []
 
-    # ---------- 背光补偿（极速版） ----------
+    # ---------- 背光补偿 ----------
     def set_bright_light_mode(self, enabled: bool):
-        """启用/关闭背光补偿（同时尝试硬件调参）"""
+        """启用/关闭背光补偿（只走纯软件图像增强，不篡改硬件曝光参数以防止卡死）"""
         self.bright_light_mode = enabled
-        if hasattr(self, 'camera') and self.camera and self.camera.isOpened():
-            try:
-                # 尝试关闭自动曝光，手动拉亮（不同摄像头兼容性不同）
-                self.camera.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)   # 手动模式
-                self.camera.set(cv2.CAP_PROP_BRIGHTNESS, 180)    # 提高亮度
-                self.camera.set(cv2.CAP_PROP_GAIN, 80)
-                print("[CAM] 已切换手动高亮模式（硬件调参）")
-            except Exception as e:
-                print(f"[WARN] 摄像头不支持手动曝光: {e}")
+        status_str = "ENABLED" if enabled else "DISABLED"
+        print(f"[CAM] 背光补偿模式: {status_str}")
 
     def set_bright_light_params(self, params: dict):
         """Update manual adjustment settings (gain, contrast, saturation, white_balance) for Bright Light WDR mode."""
@@ -129,29 +164,44 @@ class InsightFaceAttendance:
 
     # ---------- 摄像头切换 ----------
     def switch_camera(self, camera_id):
-        """切换摄像头（保留自适应逻辑）"""
+        """切换摄像头（支持 RTSP 字符串和整数 ID）"""
         if hasattr(self, 'camera') and self.camera:
             self.camera.release()
+            
         self.current_camera_id = camera_id
-        self.camera = cv2.VideoCapture(self.current_camera_id)
+        self.camera = self._create_video_capture(camera_id)
         if not self.camera.isOpened():
+            print(f"[CAM ERROR] Failed to open camera stream: {camera_id}")
             return False
-        fourcc = cv2.VideoWriter_fourcc('M','J','P','G')
-        self.camera.set(cv2.CAP_PROP_FOURCC, fourcc)
-        w = int(self.camera.get(cv2.CAP_PROP_FRAME_WIDTH))
-        h = int(self.camera.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        print(f"[CAM] 切换摄像头分辨率: {w}x{h}")
-        self.original_width = w
-        self.original_height = h
+            
+        # 只有本地摄像头才尝试设置 MJPEG
+        if isinstance(camera_id, int) or (isinstance(camera_id, str) and camera_id.isdigit()):
+            try:
+                fourcc = cv2.VideoWriter_fourcc('M','J','P','G')
+                self.camera.set(cv2.CAP_PROP_FOURCC, fourcc)
+            except Exception:
+                pass
+            
+        try:
+            w = int(self.camera.get(cv2.CAP_PROP_FRAME_WIDTH))
+            h = int(self.camera.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            if w <= 0 or h <= 0:
+                w, h = 640, 480
+            print(f"[CAM] 切换摄像头分辨率: {w}x{h}")
+            self.original_width = w
+            self.original_height = h
+        except Exception:
+            pass
+
         if self.bright_light_mode:
             self.set_bright_light_mode(True)
-        return self.camera.isOpened()
+        return True
 
     # ---------- 准备模型 ----------
     def prepare(self, ctx_id=-1, det_size=(320, 320)):   # det_size 改为 320
         """初始化 InsightFace 模型（使用 320x320 加速）"""
         if self.face_app is None:
-            self.face_app = insightface.app.FaceAnalysis(name='buffalo_l', root='./models')
+            self.face_app = insightface.app.FaceAnalysis(name='buffalo_l', root='./models', providers=['CPUExecutionProvider'])
         self.face_app.prepare(ctx_id=ctx_id, det_size=det_size)  # 不设 max_num，允许多人
         self.is_prepared = True
         
