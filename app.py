@@ -855,40 +855,102 @@ class AutoAttendanceApp(ctk.CTk):
         self._update_bright_light_params()
 
     def add_wifi_camera_dialog(self):
-        dialog = ctk.CTkInputDialog(
-            text="Enter WiFi/IP Camera URL (RTSP/HTTP):\nExample:\nrtsp://192.168.1.100:554/live\nhttp://192.168.1.100:8080/video", 
-            title="Add WiFi Camera"
+        popup = ctk.CTkToplevel(self)
+        popup.title("Add WiFi Camera")
+        popup.geometry("580x640")
+        popup.resizable(False, False)
+        popup.attributes("-topmost", True)
+
+        popup.update_idletasks()
+        w = popup.winfo_width()
+        h = popup.winfo_height()
+        x = self.winfo_x() + (self.winfo_width() // 2) - (w // 2)
+        y = self.winfo_y() + (self.winfo_height() // 2) - (h // 2)
+        popup.geometry(f"+{x}+{y}")
+        popup.grab_set()
+
+        # Title Header
+        ctk.CTkLabel(popup, text="Add WiFi / IP Camera", font=("Arial", 18, "bold"), text_color="#1F2937").pack(pady=(15, 5))
+
+        # Instructions / Tips Box
+        tips_box = ctk.CTkFrame(popup, fg_color="#F9FAFB", corner_radius=10, border_width=1, border_color="#E5E7EB")
+        tips_box.pack(fill="x", padx=20, pady=10)
+
+        tips_text = (
+            "Enter WiFi / IP Camera URL (RTSP / HTTP):\n"
+            "Example:\n"
+            "   rtsp://192.168.1.100:554/live\n"
+            "   http://192.168.1.100:8080/video\n\n"
+            "──────────────────────────────────────────────────────\n"
+            "⚠️ Please pay attention to these 4 key details for Tapo WIFI Camera:\n\n"
+            "1. RTSP URL Format:\n"
+            "   rtsp://[username]:[password]@[IP]:554/stream1\n"
+            "   Example: rtsp://admin:123456@192.168.68.108:554/stream1\n"
+            "   (Sometimes: rtsp://[IP]:554/stream1 or with path like /h264)\n\n"
+            "2. Port Number:\n"
+            "   Must include :554 (the standard RTSP streaming port).\n\n"
+            "3. Username / Password:\n"
+            "   Must use the Camera Account created in Tapo App\n"
+            "   ('Advanced Settings -> Camera Account'), NOT your Tapo App login password!\n"
+            "   Create one in the Tapo App if not created yet.\n\n"
+            "4. Same WiFi Network:\n"
+            "   Your PC and WiFi Camera MUST be connected to the SAME WiFi network!"
         )
-        url = dialog.get_input()
-        if not url:
-            return
-        url = url.strip()
-        if not url:
-            return
-            
-        print(f"[INFO] Testing connection to WiFi Camera: {url}")
-        
-        # Create a brief visual feedback or directly test (with timeout or quickly)
-        cap = cv2.VideoCapture(url)
-        if not cap.isOpened():
-            messagebox.showerror("Connection Failed", "Could not connect to the WiFi Camera URL.\nPlease check the URL and make sure the camera is connected to the same network.")
+
+        tips_lbl = ctk.CTkLabel(tips_box, text=tips_text, font=("Arial", 11), text_color="#374151", justify="left", anchor="w")
+        tips_lbl.pack(fill="x", padx=14, pady=12)
+
+        # Input Entry
+        ctk.CTkLabel(popup, text="Enter WiFi / IP Camera URL (RTSP / HTTP):", font=("Arial", 12, "bold"), anchor="w").pack(fill="x", padx=20, pady=(5, 2))
+
+        entry_var = tk.StringVar()
+        url_entry = ctk.CTkEntry(popup, textvariable=entry_var, placeholder_text="e.g. rtsp://admin:123456@192.168.68.108:554/stream1", height=38, font=("Arial", 12))
+        url_entry.pack(fill="x", padx=20, pady=(0, 15))
+        url_entry.focus()
+
+        # Action Buttons
+        btn_frame = ctk.CTkFrame(popup, fg_color="transparent")
+        btn_frame.pack(fill="x", padx=20, pady=(5, 15))
+
+        def confirm_add():
+            url = entry_var.get().strip()
+            if not url:
+                messagebox.showwarning("Warning", "Camera URL cannot be empty.", parent=popup)
+                return
+
+            print(f"[INFO] Testing connection to WiFi Camera: {url}")
+            cap = cv2.VideoCapture(url)
+            if not cap.isOpened():
+                messagebox.showerror("Connection Failed",
+                                     "Could not connect to the WiFi Camera URL.\n\n"
+                                     "Please check:\n"
+                                     "1. Is the camera powered on?\n"
+                                     "2. Is your PC on the SAME WiFi network as the camera?\n"
+                                     "3. Are the camera username, password, and port :554 correct?",
+                                     parent=popup)
+                cap.release()
+                return
             cap.release()
-            return
-        cap.release()
-        
-        # Save to settings
-        wifi_cams = self.settings.get("wifi_cameras", [])
-        if url not in wifi_cams:
-            wifi_cams.append(url)
-            self.settings["wifi_cameras"] = wifi_cams
-            self.save_settings()
-            
-        self.refresh_camera_list()
-        
-        # Select and switch to the new camera
-        display_name = f"WiFi Camera: {url}"
-        self.cam_var.set(display_name)
-        self.on_camera_change(display_name)
+
+            # Save to settings
+            wifi_cams = self.settings.get("wifi_cameras", [])
+            if url not in wifi_cams:
+                wifi_cams.append(url)
+                self.settings["wifi_cameras"] = wifi_cams
+                self.save_settings()
+
+            self.refresh_camera_list()
+
+            # Select and switch to the new camera
+            display_name = f"WiFi Camera: {url}"
+            self.cam_var.set(display_name)
+            self.on_camera_change(display_name)
+            popup.destroy()
+
+        url_entry.bind("<Return>", lambda _: confirm_add())
+
+        ctk.CTkButton(btn_frame, text="Cancel", fg_color="#6B7280", hover_color="#4B5563", width=110, height=38, command=popup.destroy).pack(side="right", padx=(10, 0))
+        ctk.CTkButton(btn_frame, text="Connect & Save", fg_color="#007BFF", hover_color="#0056B3", width=140, height=38, command=confirm_add).pack(side="right")
 
     def start_auto_search(self):
         popup = ctk.CTkToplevel(self)
@@ -3139,11 +3201,20 @@ class AutoAttendanceApp(ctk.CTk):
                 subprocess.run(["git", "remote", "add", "origin", "https://github.com/esproducers/TJC-Auto-Attendance.git"], cwd=os.getcwd(), capture_output=True)
                 
             # 3. Execution
-            # We use git reset --hard origin/main to ensure the local code becomes identical to the server
-            # This is the most reliable way to update for non-developers.
+            # Untrack local venv from git index so running python binaries are never locked by Windows OS
+            subprocess.run(["git", "rm", "-r", "--cached", "venv"], cwd=os.getcwd(), capture_output=True)
+
+            # Fetch latest code from GitHub
             subprocess.run(["git", "fetch", "--all"], check=True, cwd=os.getcwd(), capture_output=True)
-            subprocess.run(["git", "reset", "--hard", "origin/main"], check=True, cwd=os.getcwd(), capture_output=True)
-            
+
+            # Checkout latest code from origin/main while excluding venv (prevents unlinking locked python.exe)
+            res = subprocess.run(["git", "checkout", "origin/main", "--", ".", ":(exclude)venv"], cwd=os.getcwd(), capture_output=True)
+            if res.returncode != 0:
+                subprocess.run(["git", "checkout", "origin/main", "--", "."], check=True, cwd=os.getcwd(), capture_output=True)
+
+            # Reset index to match origin/main
+            subprocess.run(["git", "reset", "origin/main"], cwd=os.getcwd(), capture_output=True)
+
             messagebox.showinfo("Update Success", 
                                 "Application updated successfully to the latest GitHub version!\n\n"
                                 "Please RESTART the application for changes to take effect.")
