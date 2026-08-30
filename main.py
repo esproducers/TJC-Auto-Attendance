@@ -1230,10 +1230,10 @@ class InsightFaceAttendance:
             sid = self.active_session_id
             df  = pd.read_sql("""
                 SELECT a.id,
-                       COALESCE(m.name,        a.person_name)  AS name,
+                       COALESCE(a.person_name, m.name)         AS name,
                        COALESCE(m.age_category, '')    AS age,
                        COALESCE(m.member_code, a.member_code)  AS member_code,
-                       COALESCE(m.type,        a.status)       AS type,
+                       COALESCE(a.status,      m.type)         AS type,
                        COALESCE(m.area,        '')             AS area,
                        a.record_image, a.check_in_time,        a.status
                 FROM   attendance a
@@ -1320,9 +1320,9 @@ class InsightFaceAttendance:
                 COUNT(a.id) as present,
                 SUM(CASE WHEN m.title = 'Brother' THEN 1 ELSE 0 END) as bro,
                 SUM(CASE WHEN m.title = 'Sister' THEN 1 ELSE 0 END) as sis,
-                SUM(CASE WHEN m.type = 'Area Member' THEN 1 ELSE 0 END) as area_present,
-                SUM(CASE WHEN m.type = 'Other Area Member' THEN 1 ELSE 0 END) as other_mbr,
-                SUM(CASE WHEN m.type LIKE '%Truth%' THEN 1 ELSE 0 END) as ts,
+                SUM(CASE WHEN LOWER(COALESCE(a.status, m.type)) = 'area member' THEN 1 ELSE 0 END) as area_present,
+                SUM(CASE WHEN LOWER(COALESCE(a.status, m.type)) = 'other area member' THEN 1 ELSE 0 END) as other_mbr,
+                SUM(CASE WHEN LOWER(COALESCE(a.status, m.type)) LIKE '%truth%' THEN 1 ELSE 0 END) as ts,
                 COUNT(DISTINCT s.id) as sess_count
 
             FROM sessions s
@@ -1398,9 +1398,9 @@ class InsightFaceAttendance:
                 COUNT(a.id) as Present,
                 SUM(CASE WHEN m.title = 'Brother' THEN 1 ELSE 0 END) as Bro,
                 SUM(CASE WHEN m.title = 'Sister' THEN 1 ELSE 0 END) as Sis,
-                SUM(CASE WHEN m.type = 'Area Member' THEN 1 ELSE 0 END) as Area_Present,
-                SUM(CASE WHEN m.type = 'Other Area Member' THEN 1 ELSE 0 END) as Other_Mbr,
-                SUM(CASE WHEN m.type LIKE '%Truth%' THEN 1 ELSE 0 END) as TS
+                SUM(CASE WHEN LOWER(COALESCE(a.status, m.type)) = 'area member' THEN 1 ELSE 0 END) as Area_Present,
+                SUM(CASE WHEN LOWER(COALESCE(a.status, m.type)) = 'other area member' THEN 1 ELSE 0 END) as Other_Mbr,
+                SUM(CASE WHEN LOWER(COALESCE(a.status, m.type)) LIKE '%truth%' THEN 1 ELSE 0 END) as TS
             FROM sessions s
             JOIN attendance a ON a.session_id = s.id
             LEFT JOIN members m ON a.member_code = m.member_code

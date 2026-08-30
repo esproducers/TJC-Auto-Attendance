@@ -2241,7 +2241,7 @@ class AutoAttendanceApp(ctk.CTk):
         area_total = conn.execute("SELECT COUNT(*) FROM members WHERE type='Area Member' AND (is_disabled = 0 OR is_disabled IS NULL)").fetchone()[0]
 
         attendees = conn.execute("""
-            SELECT a.id, COALESCE(m.name, a.person_name), a.status, a.check_in_time, a.record_image,
+            SELECT a.id, COALESCE(a.person_name, m.name), a.status, a.check_in_time, a.record_image,
                    m.age_category, a.member_code, m.area, m.title
             FROM attendance a
             LEFT JOIN members m ON a.member_code = m.member_code
@@ -4660,8 +4660,8 @@ class AutoAttendanceApp(ctk.CTk):
 
         conn = sqlite3.connect("database/attendance.db")
         rows = conn.execute("""
-            SELECT a.member_code, COALESCE(m.name, a.person_name, 'Unknown') AS name,
-                   a.record_image, COALESCE(m.type, a.status, 'Member') AS mtype,
+            SELECT a.member_code, COALESCE(a.person_name, m.name, 'Unknown') AS name,
+                   a.record_image, COALESCE(a.status, m.type, 'Member') AS mtype,
                    m.title, a.check_in_time
             FROM attendance a
             LEFT JOIN members m ON a.member_code = m.member_code
@@ -5881,7 +5881,7 @@ class AutoAttendanceApp(ctk.CTk):
 
         # Attendance rows table
         t_query = """
-            SELECT a.service_date, s.title, m.member_code, m.name, m.title, m.reu_class, m.phone, a.check_in_time
+            SELECT a.service_date, s.title, m.member_code, COALESCE(a.person_name, m.name), m.title, m.reu_class, m.phone, a.check_in_time
             FROM attendance a
             LEFT JOIN members m ON a.member_code = m.member_code
             LEFT JOIN sessions s ON a.session_id = s.id
