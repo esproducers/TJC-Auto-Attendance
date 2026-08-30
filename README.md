@@ -29,14 +29,14 @@ This system utilizes the InsightFace facial recognition engine specifically tail
 This guide explains how to set up the Auto-Attendance tracker on a **New Windows PC** or a **Mac (macOS)**.
 
 ## 📋 Prerequisites
-- **Python 3.11** (recommended). [Download here](https://www.python.org/downloads/)
+- **Python 3.11.9 recommended). [Download here](https://www.python.org/downloads/)
 - A **Webcam** (USB or built-in).
 
 ---
 
 ## 💻 1. Windows Installation
 
-### Step 1: Install Python 3.11.0
+### Step 1: Install Python 3.11.9
 When installing Python from the official website, make sure to check the box: **"Add Python to PATH"**.
 
 ### Step 2: Download the Code
@@ -69,7 +69,7 @@ run.bat
 
 **## 🍎 2. Mac (macOS) Installation**
 9+-
-### Step 1: Install Python 3.11.0
+### Step 1: Install Python 3.11.9
 When installing Python from the official website
 
 ### Step 2: Install JDK-JAVA
@@ -191,6 +191,8 @@ If you want to move your existing members and photos to the new computer:
 1.  Copy the **`database/attendance.db`** file.
 2.  Copy the **`registered_faces/`** folder (contains member photos).
 3.  Copy the **`records/`** folder (contains history).
+or
+Do **"Sync in"**  or **"Sync out"** in member info page to share data info and Faces Photos to other computers
 
 ---
 
