@@ -750,12 +750,19 @@ class AutoAttendanceApp(ctk.CTk):
         
         # Add WiFi cameras from settings
         wifi_cams = self.settings.get("wifi_cameras", [])
-        for url in wifi_cams:
-            available.append(f"WiFi Camera: {url}")
+        for cam in wifi_cams:
+            if isinstance(cam, dict):
+                available.append(cam.get("name", "WIFI Camera"))
+            else:
+                available.append(f"WiFi Camera: {cam}")
             
         # Ensure current camera is in list if it's a string URL
         if isinstance(current_id, str) and current_id.startswith(("rtsp://", "http://", "https://")):
             display_name = f"WiFi Camera: {current_id}"
+            for cam in wifi_cams:
+                if isinstance(cam, dict) and cam.get("url") == current_id:
+                    display_name = cam.get("name")
+                    break
             if display_name not in available:
                 available.append(display_name)
         
@@ -763,7 +770,12 @@ class AutoAttendanceApp(ctk.CTk):
         
         # Keep dropdown in sync
         if isinstance(current_id, str):
-            self.cam_var.set(f"WiFi Camera: {current_id}")
+            display_name = f"WiFi Camera: {current_id}"
+            for cam in wifi_cams:
+                if isinstance(cam, dict) and cam.get("url") == current_id:
+                    display_name = cam.get("name")
+                    break
+            self.cam_var.set(display_name)
         else:
             self.cam_var.set(f"Camera {current_id}")
 
@@ -780,6 +792,11 @@ class AutoAttendanceApp(ctk.CTk):
                     cam_id = choice
             else:
                 cam_id = choice
+                wifi_cams = self.settings.get("wifi_cameras", [])
+                for cam in wifi_cams:
+                    if isinstance(cam, dict) and cam.get("name") == choice:
+                        cam_id = cam.get("url")
+                        break
 
             # If already active, no need to re-open
             if cam_id == prev_cam_id and hasattr(self.backend, 'camera') and self.backend.camera and self.backend.camera.isOpened():
@@ -900,6 +917,21 @@ class AutoAttendanceApp(ctk.CTk):
         tips_lbl = ctk.CTkLabel(tips_box, text=tips_text, font=("Arial", 11), text_color="#374151", justify="left", anchor="w")
         tips_lbl.pack(fill="x", padx=14, pady=12)
 
+        # Camera Name Entry
+        ctk.CTkLabel(popup, text="Camera Name:", font=("Arial", 12, "bold"), anchor="w").pack(fill="x", padx=20, pady=(5, 2))
+
+        name_var = tk.StringVar()
+        # Auto-generate default name like "WIFI Camera 01"
+        wifi_cams = self.settings.get("wifi_cameras", [])
+        existing_names = [c.get("name") for c in wifi_cams if isinstance(c, dict)]
+        idx = 1
+        while f"WIFI Camera {idx:02d}" in existing_names:
+            idx += 1
+        name_var.set(f"WIFI Camera {idx:02d}")
+
+        name_entry = ctk.CTkEntry(popup, textvariable=name_var, height=38, font=("Arial", 12))
+        name_entry.pack(fill="x", padx=20, pady=(0, 15))
+
         # Input Entry
         ctk.CTkLabel(popup, text="Enter WiFi / IP Camera URL (RTSP / HTTP):", font=("Arial", 12, "bold"), anchor="w").pack(fill="x", padx=20, pady=(5, 2))
 
@@ -934,17 +966,19 @@ class AutoAttendanceApp(ctk.CTk):
 
             # Save to settings
             wifi_cams = self.settings.get("wifi_cameras", [])
-            if url not in wifi_cams:
-                wifi_cams.append(url)
+            cam_name = name_var.get().strip() or f"WIFI Camera {idx:02d}"
+            
+            url_exists = any(isinstance(c, dict) and c.get("url") == url for c in wifi_cams) or url in wifi_cams
+            if not url_exists:
+                wifi_cams.append({"name": cam_name, "url": url})
                 self.settings["wifi_cameras"] = wifi_cams
                 self.save_settings()
 
             self.refresh_camera_list()
 
             # Select and switch to the new camera
-            display_name = f"WiFi Camera: {url}"
-            self.cam_var.set(display_name)
-            self.on_camera_change(display_name)
+            self.cam_var.set(cam_name)
+            self.on_camera_change(cam_name)
             popup.destroy()
 
         url_entry.bind("<Return>", lambda _: confirm_add())
@@ -1047,14 +1081,23 @@ class AutoAttendanceApp(ctk.CTk):
                 url = selected_url.get().strip()
                 if url:
                     wifi_cams = self.settings.get("wifi_cameras", [])
-                    if url not in wifi_cams:
-                        wifi_cams.append(url)
+                    url_exists = any(isinstance(c, dict) and c.get("url") == url for c in wifi_cams) or url in wifi_cams
+                    
+                    if not url_exists:
+                        existing_names = [c.get("name") for c in wifi_cams if isinstance(c, dict)]
+                        idx = 1
+                        while f"WIFI Camera {idx:02d}" in existing_names: idx += 1
+                        cam_name = f"WIFI Camera {idx:02d}"
+                        
+                        wifi_cams.append({"name": cam_name, "url": url})
                         self.settings["wifi_cameras"] = wifi_cams
                         self.save_settings()
+                    else:
+                        cam_name = next((c.get("name") for c in wifi_cams if isinstance(c, dict) and c.get("url") == url), f"WiFi Camera: {url}")
+
                     self.refresh_camera_list()
-                    display_name = f"WiFi Camera: {url}"
-                    self.cam_var.set(display_name)
-                    self.on_camera_change(display_name)
+                    self.cam_var.set(cam_name)
+                    self.on_camera_change(cam_name)
                     res_dialog.destroy()
                     messagebox.showinfo("Success", f"Connected to: {url}")
             
@@ -1065,15 +1108,25 @@ class AutoAttendanceApp(ctk.CTk):
 
     def delete_wifi_camera(self):
         choice = self.cam_var.get()
-        if not choice.startswith("WiFi Camera: "):
+        if not choice or choice.startswith("Camera "):
             messagebox.showwarning("Invalid Selection", "Please select a WiFi Camera from the dropdown first to remove it.")
             return
             
-        url = choice.replace("WiFi Camera: ", "").strip()
         wifi_cams = self.settings.get("wifi_cameras", [])
-        if url in wifi_cams:
-            if messagebox.askyesno("Confirm Removal", f"Remove this WiFi Camera URL from settings?\n\n{url}"):
-                wifi_cams.remove(url)
+        
+        target = None
+        for cam in wifi_cams:
+            if isinstance(cam, dict) and cam.get("name") == choice:
+                target = cam
+                break
+            elif isinstance(cam, str) and f"WiFi Camera: {cam}" == choice:
+                target = cam
+                break
+                
+        if target:
+            target_url = target.get("url") if isinstance(target, dict) else target
+            if messagebox.askyesno("Confirm Removal", f"Remove this WiFi Camera ({choice}) from settings?\n\nURL: {target_url}"):
+                wifi_cams.remove(target)
                 self.settings["wifi_cameras"] = wifi_cams
                 self.save_settings()
                 
@@ -1109,6 +1162,7 @@ class AutoAttendanceApp(ctk.CTk):
                 self.refresh_members_ui_visibility()
                 self.show_frame("dashboard")
                 self.refresh_member_table()
+                self.refresh_logs_table()
         else:
             self.show_login_popup()
 
@@ -1139,6 +1193,7 @@ class AutoAttendanceApp(ctk.CTk):
                 self.refresh_sidebar_visibility()
                 self.refresh_members_ui_visibility()
                 self.refresh_member_table()
+                self.refresh_logs_table()
                 dialog.destroy()
                 messagebox.showinfo("Success", "Welcome back, Admin!")
             else:
@@ -1603,6 +1658,13 @@ class AutoAttendanceApp(ctk.CTk):
         self.member_area_filter.pack()
         self.member_area_filter.bind("<Return>", lambda _: self.refresh_member_table())
 
+        # Status Filter
+        s_st_f = ctk.CTkFrame(filter_f, fg_color="transparent")
+        s_st_f.pack(side="left", padx=10)
+        ctk.CTkLabel(s_st_f, text="STATUS", font=("Arial", 10, "bold"), text_color="#9CA3AF").pack(anchor="w")
+        self.member_status_filter = ctk.CTkComboBox(s_st_f, values=["Active Only", "Disabled Only", "All Members"], width=130, command=lambda _: self.refresh_member_table())
+        self.member_status_filter.pack()
+
         # Search Button
         ctk.CTkButton(filter_f, text="🔍  Search", width=100, height=36, fg_color="#007BFF", hover_color="#0069D9", font=("Arial", 12, "bold"), command=self.refresh_member_table).pack(side="left", padx=10, pady=(15, 0))
 
@@ -1661,14 +1723,21 @@ class AutoAttendanceApp(ctk.CTk):
         
         self.member_checkboxes = {}
         
-        q_name = self.member_search.get().strip().lower()
-        q_type = self.member_type_filter.get()
-        q_area = self.member_area_filter.get().strip().lower()
+        q_name   = self.member_search.get().strip().lower()
+        q_type   = self.member_type_filter.get()
+        q_area   = self.member_area_filter.get().strip().lower()
+        q_status = getattr(self, "member_status_filter", None)
+        q_status = q_status.get() if q_status else "Active Only"
 
         conn  = sqlite3.connect("database/attendance.db")
-        query = "SELECT member_code, name, type, age_category, area, image_path, title FROM members WHERE 1=1"
+        query = "SELECT member_code, name, type, age_category, area, image_path, title, is_disabled, disable_remark FROM members WHERE 1=1"
         params = []
         
+        if q_status == "Active Only":
+            query += " AND (is_disabled = 0 OR is_disabled IS NULL)"
+        elif q_status == "Disabled Only":
+            query += " AND is_disabled = 1"
+
         if q_name:
             query += " AND (LOWER(name) LIKE ? OR LOWER(member_code) LIKE ?)"
             params.append(f"%{q_name}%"); params.append(f"%{q_name}%")
@@ -1681,44 +1750,51 @@ class AutoAttendanceApp(ctk.CTk):
             
         query += " ORDER BY member_code DESC"
         df = pd.read_sql(query, conn, params=params)
+
+        # Count active stats for top cards
+        active_counts = conn.execute("""
+            SELECT 
+                COUNT(*) as total,
+                SUM(CASE WHEN LOWER(type) = 'area member' THEN 1 ELSE 0 END) as area_m,
+                SUM(CASE WHEN LOWER(type) = 'other area member' THEN 1 ELSE 0 END) as oth_m,
+                SUM(CASE WHEN LOWER(type) = 'truth seeker' THEN 1 ELSE 0 END) as ts
+            FROM members WHERE (is_disabled = 0 OR is_disabled IS NULL)
+        """).fetchone()
         conn.close()
 
-        # --- UPDATE STATS COUNTERS ---
-        curr_area = (self.settings.get("default_area", "") or "").lower().strip()
-        
-        # Ensure area and type are strings and handle NULLs
-        df['area'] = df['area'].fillna("").astype(str).str.lower().str.strip()
-        df['type'] = df['type'].fillna("Area Member").astype(str)
-        
-        t_total = len(df)
-        t_area_m  = len(df[df['type'].str.lower() == 'area member'])
-        t_oth_m   = len(df[df['type'].str.lower() == 'other area member'])
-        t_ts      = len(df[df['type'].str.lower() == 'truth seeker'])
-        
-        self.member_stats_labels["Total DB Count"].configure(text=str(t_total))
-        self.member_stats_labels["Area Member"].configure(text=str(t_area_m))
-        self.member_stats_labels["Other Area Member"].configure(text=str(t_oth_m))
-        self.member_stats_labels["Truth Seeker"].configure(text=str(t_ts))
-        # -----------------------------
+        self.member_stats_labels["Total DB Count"].configure(text=str(active_counts[0] or 0))
+        self.member_stats_labels["Area Member"].configure(text=str(active_counts[1] or 0))
+        self.member_stats_labels["Other Area Member"].configure(text=str(active_counts[2] or 0))
+        self.member_stats_labels["Truth Seeker"].configure(text=str(active_counts[3] or 0))
 
         if df.empty:
-            ctk.CTkLabel(self.member_scroll, text="No members found.", font=("Arial", 13), text_color="gray").pack(pady=40)
+            ctk.CTkLabel(self.member_scroll, text="No members found matching filter.", font=("Arial", 13), text_color="gray").pack(pady=40)
             return
 
         for _, row_data in df.iterrows():
-            code, name, m_type, age, area, img_p, title = row_data['member_code'], row_data['name'], row_data['type'], row_data['age_category'], row_data['area'], row_data['image_path'], row_data['title']
-            row = ctk.CTkFrame(self.member_scroll, fg_color="transparent", height=85)
-            row.pack(fill="x", pady=0)
+            code = row_data['member_code']
+            name = row_data['name']
+            m_type = str(row_data['type']) if row_data['type'] is not None else 'Area Member'
+            age = row_data['age_category']
+            area = str(row_data['area']) if row_data['area'] is not None else ''
+            img_p = row_data['image_path']
+            title = row_data['title']
+            is_dis = bool(row_data['is_disabled']) if 'is_disabled' in row_data and not pd.isna(row_data['is_disabled']) else False
+            dis_rem = str(row_data['disable_remark']) if 'disable_remark' in row_data and not pd.isna(row_data['disable_remark']) else ""
+
+            row_color = "#F3F4F6" if is_dis else "transparent"
+            row = ctk.CTkFrame(self.member_scroll, fg_color=row_color, height=85)
+            row.pack(fill="x", pady=1)
             row.grid_columnconfigure(0, minsize=40); row.grid_columnconfigure(1, minsize=80)
             row.grid_columnconfigure(2, weight=3); row.grid_columnconfigure(3, minsize=100)
-            row.grid_columnconfigure(4, minsize=120); row.grid_columnconfigure(5, minsize=140)
+            row.grid_columnconfigure(4, minsize=120); row.grid_columnconfigure(5, minsize=160)
 
             # Checkbox
             cb_var = tk.BooleanVar(value=False); self.member_checkboxes[code] = cb_var
             ctk.CTkCheckBox(row, text="", variable=cb_var, width=20).grid(row=0, column=0, padx=(10, 0))
 
             # Photo
-            img_lbl = ctk.CTkLabel(row, text="👤", width=60, height=60, fg_color="#F3F4F6", corner_radius=30)
+            img_lbl = ctk.CTkLabel(row, text="👤", width=60, height=60, fg_color="#E5E7EB" if is_dis else "#F3F4F6", corner_radius=30)
             img_lbl.grid(row=0, column=1, padx=10, pady=10)
             if img_p and os.path.exists(img_p):
                 try:
@@ -1732,8 +1808,13 @@ class AutoAttendanceApp(ctk.CTk):
             info_f.grid(row=0, column=2, sticky="w", padx=10)
             
             display_name = f"{title} {name}" if title else name
-            ctk.CTkLabel(info_f, text=display_name, font=("Arial", 15, "bold"), text_color="#1F2937").pack(anchor="w")
-            ctk.CTkLabel(info_f, text=f"ID: {code}  |  Age: {age or '--'}  |  Title: {title or '--'}", font=("Arial", 11), text_color="#6B7280").pack(anchor="w")
+            if is_dis:
+                ctk.CTkLabel(info_f, text=f"{display_name}  (DISABLED)", font=("Arial", 15, "bold"), text_color="#EF4444").pack(anchor="w")
+                remark_txt = f"Reason: {dis_rem}" if dis_rem else "Disabled / Inactive"
+                ctk.CTkLabel(info_f, text=f"ID: {code}  |  {remark_txt}", font=("Arial", 11, "bold"), text_color="#DC2626").pack(anchor="w")
+            else:
+                ctk.CTkLabel(info_f, text=display_name, font=("Arial", 15, "bold"), text_color="#1F2937").pack(anchor="w")
+                ctk.CTkLabel(info_f, text=f"ID: {code}  |  Age: {age or '--'}  |  Title: {title or '--'}", font=("Arial", 11), text_color="#6B7280").pack(anchor="w")
 
             # Type
             badge_color = "#EBF5FF" if m_type == "Member" else "#F0FDFA"
@@ -1751,14 +1832,23 @@ class AutoAttendanceApp(ctk.CTk):
                 btn_edit = ctk.CTkButton(act_f, text="✎", width=30, height=30, fg_color="transparent", text_color="#10B981", hover_color="#D1FAE5", font=("Arial", 14), command=lambda c=code: self.on_edit_member(c))
                 btn_edit.pack(side="left", padx=1)
                 Tooltip(btn_edit, "Edit Member Details")
-    
+
+                if is_dis:
+                    btn_en = ctk.CTkButton(act_f, text="▶", width=30, height=30, fg_color="transparent", text_color="#10B981", hover_color="#D1FAE5", font=("Arial", 14), command=lambda c=code: self.on_enable_member(c))
+                    btn_en.pack(side="left", padx=1)
+                    Tooltip(btn_en, "Re-enable Member (Turn On Recognition)")
+                else:
+                    btn_dis = ctk.CTkButton(act_f, text="⏸", width=30, height=30, fg_color="transparent", text_color="#F59E0B", hover_color="#FEF3C7", font=("Arial", 14), command=lambda c=code: self.on_disable_member(c))
+                    btn_dis.pack(side="left", padx=1)
+                    Tooltip(btn_dis, "Disable Member (Pass Away / Move Country)")
+
                 btn_pdf = ctk.CTkButton(act_f, text="📕", width=30, height=30, fg_color="transparent", text_color="#EF4444", hover_color="#FEE2E2", font=("Arial", 14), command=lambda c=code: self.on_individual_member_export("pdf", c))
                 btn_pdf.pack(side="left", padx=1)
                 Tooltip(btn_pdf, "Export Member Profile")
     
                 btn_del = ctk.CTkButton(act_f, text="🗑", width=30, height=30, fg_color="transparent", text_color="#9CA3AF", hover_color="#F3F4F6", font=("Arial", 14), command=lambda c=code: self.on_delete_member(c))
                 btn_del.pack(side="left", padx=1)
-                Tooltip(btn_del, "Delete Member")
+                Tooltip(btn_del, "Permanently Delete Member")
             else:
                 ctk.CTkLabel(act_f, text="[Admin only]", font=("Arial", 10), text_color="gray").pack(side="left", padx=10)
 
@@ -1825,14 +1915,18 @@ class AutoAttendanceApp(ctk.CTk):
             ctk.CTkButton(btn_f, text="View Attendees", width=140, height=32, font=("Arial", 11, "bold"), fg_color=b_color, hover_color=h_color,
                           command=lambda s=sid: self.show_session_details_popup(s)).pack(side="left", padx=5)
             
-            ctk.CTkButton(btn_f, text="X", width=32, height=32, font=("Arial", 11, "bold"), fg_color="transparent", text_color="#DC3545", border_width=1, border_color="#DC3545", hover_color="#FEE2E2",
-                          command=lambda s=sid: self.delete_session_log(s)).pack(side="left")
+            if self.is_admin:
+                ctk.CTkButton(btn_f, text="X", width=32, height=32, font=("Arial", 11, "bold"), fg_color="transparent", text_color="#DC3545", border_width=1, border_color="#DC3545", hover_color="#FEE2E2",
+                              command=lambda s=sid: self.delete_session_log(s)).pack(side="left")
 
             self.after(20, lambda: add_session_gradually(index + 1))
 
         add_session_gradually()
 
     def delete_session_log(self, session_id):
+        if not self.is_admin:
+            messagebox.showerror("Access Denied", "Only administrators can delete attendance session logs.", parent=self)
+            return
         if messagebox.askyesno("Delete Session", "Are you sure you want to permanently delete this session and all its records (including photos)?"):
             try:
                 conn = sqlite3.connect("database/attendance.db")
@@ -2057,7 +2151,7 @@ class AutoAttendanceApp(ctk.CTk):
                 query += " ORDER BY s.date DESC, s.start_time DESC LIMIT 150"
 
                 sessions   = conn.execute(query, params).fetchall()
-                area_total = conn.execute("SELECT COUNT(*) FROM members WHERE type='Area Member'").fetchone()[0] or 0
+                area_total = conn.execute("SELECT COUNT(*) FROM members WHERE type='Area Member' AND (is_disabled = 0 OR is_disabled IS NULL)").fetchone()[0] or 0
                 conn.close()
 
                 # Hand results back to UI thread via queue
@@ -2142,9 +2236,9 @@ class AutoAttendanceApp(ctk.CTk):
         title_val, dt_val, target_val = sess
         
         # Calculate session-specific stats
-        total_sys_m = conn.execute("SELECT COUNT(*) FROM members").fetchone()[0]
+        total_sys_m = conn.execute("SELECT COUNT(*) FROM members WHERE (is_disabled = 0 OR is_disabled IS NULL)").fetchone()[0]
         # Denominator: Total 'Area Member' DB count
-        area_total = conn.execute("SELECT COUNT(*) FROM members WHERE type='Area Member'").fetchone()[0]
+        area_total = conn.execute("SELECT COUNT(*) FROM members WHERE type='Area Member' AND (is_disabled = 0 OR is_disabled IS NULL)").fetchone()[0]
 
         attendees = conn.execute("""
             SELECT a.id, COALESCE(m.name, a.person_name), a.status, a.check_in_time, a.record_image,
@@ -4250,6 +4344,66 @@ class AutoAttendanceApp(ctk.CTk):
                 else:
                     card.pack_forget()
 
+    def open_add_guest_dialog(self, parent_dialog=None, refresh_callback=None):
+        g_dlg = ctk.CTkToplevel(parent_dialog or self)
+        g_dlg.title("Add Guest Attendee")
+        g_dlg.geometry("420x440")
+        g_dlg.attributes("-topmost", True)
+        g_dlg.grab_set()
+
+        ctk.CTkLabel(g_dlg, text="Add Guest Attendee", font=("Arial", 16, "bold"), text_color="#1F2937").pack(pady=(15, 10))
+
+        form_f = ctk.CTkFrame(g_dlg, fg_color="transparent")
+        form_f.pack(fill="both", expand=True, padx=25, pady=5)
+
+        ctk.CTkLabel(form_f, text="Name *", font=("Arial", 11, "bold")).pack(anchor="w", pady=(5, 0))
+        name_e = ctk.CTkEntry(form_f, height=36, placeholder_text="Enter guest name...")
+        name_e.pack(fill="x", pady=(2, 8))
+
+        ctk.CTkLabel(form_f, text="Title", font=("Arial", 11, "bold")).pack(anchor="w", pady=(5, 0))
+        title_var = ctk.StringVar(value="")
+        title_opts = [""] + self.get_master_options("title", ["Brother", "Sister", "Preacher", "Preceptor", "Deacon", "Deaconess"])
+        title_cb = ctk.CTkComboBox(form_f, variable=title_var, values=title_opts, height=36)
+        title_cb.pack(fill="x", pady=(2, 8))
+
+        ctk.CTkLabel(form_f, text="Type", font=("Arial", 11, "bold")).pack(anchor="w", pady=(5, 0))
+        type_var = ctk.StringVar(value="Truth Seeker")
+        type_opts = self.get_master_options("type", ["Truth Seeker", "Other Area Member", "Area Member"])
+        type_cb = ctk.CTkComboBox(form_f, variable=type_var, values=type_opts, height=36)
+        type_cb.pack(fill="x", pady=(2, 8))
+
+        ctk.CTkLabel(form_f, text="Area", font=("Arial", 11, "bold")).pack(anchor="w", pady=(5, 0))
+        area_e = ctk.CTkEntry(form_f, height=36, placeholder_text="e.g. Kuala Lumpur")
+        area_e.pack(fill="x", pady=(2, 15))
+
+        def save_guest():
+            name = name_e.get().strip()
+            if not name:
+                messagebox.showwarning("Missing Name", "Guest name is required.", parent=g_dlg)
+                return
+
+            title = title_var.get().strip()
+            mtype = type_var.get().strip()
+            full_name = f"{title} {name}".strip() if title else name
+
+            ok, _ = self.backend.mark_attendance(full_name, None, None, mtype)
+            if ok:
+                self.refresh_stats()
+                self.activity_log.insert("1.0", f"[{datetime.now().strftime('%H:%M')}] 👥 {full_name} ({mtype} - GUEST)\n")
+                self.refresh_captured_attendees_list()
+                messagebox.showinfo("Success", f"Guest '{full_name}' added to attendance!", parent=g_dlg)
+                g_dlg.destroy()
+                if refresh_callback:
+                    refresh_callback()
+            else:
+                messagebox.showwarning("Already Present", f"Guest '{full_name}' is already checked in for this session.", parent=g_dlg)
+
+        btn_f = ctk.CTkFrame(g_dlg, fg_color="transparent")
+        btn_f.pack(fill="x", padx=25, pady=(5, 20))
+
+        ctk.CTkButton(btn_f, text="Cancel", width=100, height=36, fg_color="#F3F4F6", text_color="#374151", hover_color="#E5E7EB", command=g_dlg.destroy).pack(side="left")
+        ctk.CTkButton(btn_f, text="➕ Mark Attendance", height=36, fg_color="#10B981", hover_color="#059669", text_color="white", command=save_guest).pack(side="right", fill="x", expand=True, padx=(10, 0))
+
     def manual_add_popup(self):
         if not hasattr(self.backend, "active_session_id") or not self.backend.active_session_id:
             messagebox.showwarning("No Session", "Please start a session first.")
@@ -4367,6 +4521,11 @@ class AutoAttendanceApp(ctk.CTk):
                                       fg_color="#10B981", hover_color="#059669", command=add_batch_selected)
         add_batch_btn.pack(side="left", fill="x", expand=True, padx=(0, 5))
 
+        add_guest_btn = ctk.CTkButton(bottom_bar, text="➕ Add Guest", height=40, font=("Arial", 12, "bold"),
+                                      fg_color="#007BFF", hover_color="#0056B3", text_color="white",
+                                      command=lambda: self.open_add_guest_dialog(dialog, populate_list))
+        add_guest_btn.pack(side="left", padx=5)
+
         close_btn = ctk.CTkButton(bottom_bar, text="Done", width=90, height=40, font=("Arial", 12),
                                   fg_color="#F3F4F6", text_color="#374151", hover_color="#E5E7EB", command=dialog.destroy)
         close_btn.pack(side="right")
@@ -4441,7 +4600,7 @@ class AutoAttendanceApp(ctk.CTk):
                        COALESCE(m.type, a.status, 'Member') AS mtype, m.title
                 FROM attendance a
                 LEFT JOIN members m ON a.member_code = m.member_code
-                WHERE a.session_id = ? AND a.member_code IS NOT NULL
+                WHERE a.session_id = ? AND (a.member_code IS NOT NULL OR (a.status IS NOT NULL AND a.status != 'unknown'))
                 AND (LOWER(COALESCE(m.name, a.person_name, '')) LIKE ? OR LOWER(COALESCE(a.member_code, '')) LIKE ?)
                 ORDER BY name ASC
             """, (self.backend.active_session_id, f"%{q}%", f"%{q}%")).fetchall()
@@ -4506,7 +4665,7 @@ class AutoAttendanceApp(ctk.CTk):
                    m.title, a.check_in_time
             FROM attendance a
             LEFT JOIN members m ON a.member_code = m.member_code
-            WHERE a.session_id = ? AND a.member_code IS NOT NULL
+            WHERE a.session_id = ? AND (a.member_code IS NOT NULL OR (a.status IS NOT NULL AND a.status != 'unknown'))
             ORDER BY a.check_in_time DESC
         """, (self.backend.active_session_id,)).fetchall()
         conn.close()
@@ -4526,15 +4685,21 @@ class AutoAttendanceApp(ctk.CTk):
 
     def add_attendee_card(self, name, img_path, m_type, code, title="", check_in_time=None):
         # Prevent duplicates
+        card_id = code if code else name
         for child in self.checkin_scroll.winfo_children():
-            if hasattr(child, "member_code") and child.member_code == code:
+            target_code = getattr(child, "member_code", None)
+            target_id = getattr(child, "card_id", None)
+            target_name = getattr(child, "person_name", None)
+            if (code and target_code == code) or (card_id and target_id == card_id) or (name and target_name == name):
                 return child
 
         # Horizontal Row Design (Stable & Sleek)
         card = ctk.CTkFrame(self.checkin_scroll, fg_color="#FFFFFF", border_width=1, border_color="#E5E7EB", corner_radius=10, height=60)
         card.pack(side="top", fill="x", padx=10, pady=4)
         card.pack_propagate(False) # Preserve height
+        card.card_id = card_id
         card.member_code = code
+        card.person_name = name
 
         # [1] Profile Photo
         img_f = ctk.CTkFrame(card, width=50, height=50, fg_color="transparent")
@@ -4709,14 +4874,84 @@ class AutoAttendanceApp(ctk.CTk):
 
         ctk.CTkLabel(form, text="Action:", font=("Arial", 11, "bold"), anchor="w").pack(fill="x", padx=10, pady=(10, 2))
         action_var = ctk.StringVar(value="register_new")
+
+        # Sub-options for photo handling
+        save_face_db_var = tk.BooleanVar(value=True)   # Default True for new member
+        replace_face_var = tk.BooleanVar(value=False)  # Default False for existing member
+
+        def toggle_action_mode():
+            act = action_var.get()
+            if act == "register_new":
+                save_face_db_cb.configure(state="normal")
+                replace_face_cb.configure(state="disabled")
+                if 'existing_code_lbl' in locals(): existing_code_lbl.pack(anchor="w", pady=(10, 0))
+                if 'existing_code_e' in locals():
+                    existing_code_e.pack(pady=3, fill="x")
+                    existing_code_e.configure(state="disabled")
+                if 'search_btn' in locals():
+                    search_btn.pack(pady=5)
+                    search_btn.configure(state="disabled")
+                if 'reu_lbl' in locals(): reu_lbl.pack(anchor="w", pady=(8, 0))
+                if 'reu_cb' in locals(): reu_cb.pack(pady=3, fill="x")
+                if 'extra_member_frame' in locals(): extra_member_frame.pack(fill="x", pady=5)
+            elif act == "link_existing":
+                save_face_db_cb.configure(state="disabled")
+                replace_face_cb.configure(state="normal")
+                if 'existing_code_lbl' in locals(): existing_code_lbl.pack(anchor="w", pady=(10, 0))
+                if 'existing_code_e' in locals():
+                    existing_code_e.pack(pady=3, fill="x")
+                    existing_code_e.configure(state="normal")
+                if 'search_btn' in locals():
+                    search_btn.pack(pady=5)
+                    search_btn.configure(state="normal")
+                if 'reu_lbl' in locals(): reu_lbl.pack(anchor="w", pady=(8, 0))
+                if 'reu_cb' in locals(): reu_cb.pack(pady=3, fill="x")
+                if 'extra_member_frame' in locals(): extra_member_frame.pack(fill="x", pady=5)
+            elif act == "register_guest":
+                save_face_db_cb.configure(state="disabled")
+                replace_face_cb.configure(state="disabled")
+                save_face_db_var.set(False)
+                replace_face_var.set(False)
+                if 'existing_code_lbl' in locals(): existing_code_lbl.pack_forget()
+                if 'existing_code_e' in locals(): existing_code_e.pack_forget()
+                if 'search_btn' in locals(): search_btn.pack_forget()
+                if 'type_var' in locals(): type_var.set("Truth Seeker")
+                if 'reu_lbl' in locals(): reu_lbl.pack_forget()
+                if 'reu_cb' in locals(): reu_cb.pack_forget()
+                if 'extra_member_frame' in locals(): extra_member_frame.pack_forget()
+
+        # Option 1: Register as NEW member
         ctk.CTkRadioButton(form, text="Register as NEW member",
-                           variable=action_var, value="register_new").pack(anchor="w", padx=20)
+                           variable=action_var, value="register_new",
+                           command=toggle_action_mode).pack(anchor="w", padx=20, pady=(2, 0))
+
+        save_face_db_cb = ctk.CTkCheckBox(form, text="↳ Add face photo to database (registered_faces) for auto-recognition",
+                                          variable=save_face_db_var, font=("Arial", 10),
+                                          text_color="#374151")
+        save_face_db_cb.pack(anchor="w", padx=(42, 20), pady=(2, 8))
+
+        # Option 2: Link to EXISTING member code
         ctk.CTkRadioButton(form, text="Link to EXISTING member code",
-                           variable=action_var, value="link_existing").pack(anchor="w", padx=20, pady=(4, 12))
+                           variable=action_var, value="link_existing",
+                           command=toggle_action_mode).pack(anchor="w", padx=20, pady=(4, 0))
+
+        replace_face_cb = ctk.CTkCheckBox(form, text="↳ Replace / Overwrite original face photo using current captured photo",
+                                          variable=replace_face_var, font=("Arial", 10),
+                                          text_color="#374151")
+        replace_face_cb.pack(anchor="w", padx=(42, 20), pady=(2, 8))
+
+        # Option 3: Register as GUEST
+        ctk.CTkRadioButton(form, text="Register as GUEST (Attendance only, no DB / photo save)",
+                           variable=action_var, value="register_guest",
+                           command=toggle_action_mode).pack(anchor="w", padx=20, pady=(4, 0))
+
+        guest_note_lbl = ctk.CTkLabel(form, text="↳ Do not save member info or face photo to database",
+                                      font=("Arial", 10, "italic"), text_color="gray")
+        guest_note_lbl.pack(anchor="w", padx=(42, 20), pady=(2, 10))
 
         # Form Fields
-        ctk.CTkLabel(form, text="Existing member code (if linking):",
-                     font=("Arial", 11, "bold")).pack(anchor="w", pady=(10, 0))
+        existing_code_lbl = ctk.CTkLabel(form, text="Existing member code (if linking):", font=("Arial", 11, "bold"))
+        existing_code_lbl.pack(anchor="w", pady=(10, 0))
         existing_code_e = ctk.CTkEntry(form, width=360, placeholder_text="e.g. 0003")
         existing_code_e.pack(pady=3, fill="x")
 
@@ -4739,10 +4974,12 @@ class AutoAttendanceApp(ctk.CTk):
                 # Switch to link mode
                 action_var.set("link_existing")
                 existing_code_e.delete(0, "end"); existing_code_e.insert(0, code)
+                toggle_action_mode()
 
-        ctk.CTkButton(form, text="🔍  Search & Select Existing Member", font=("Arial", 11),
+        search_btn = ctk.CTkButton(form, text="🔍  Search & Select Existing Member", font=("Arial", 11),
                       fg_color="#6C757D", hover_color="#5A6268", height=28,
-                      command=lambda: self.pick_member_popup(on_member_selected)).pack(pady=5)
+                      command=lambda: self.pick_member_popup(on_member_selected))
+        search_btn.pack(pady=5)
 
         ctk.CTkLabel(form, text="Name *", font=("Arial", 11, "bold")).pack(anchor="w", pady=(15, 0))
         name_e = ctk.CTkEntry(form, width=360)
@@ -4760,7 +4997,8 @@ class AutoAttendanceApp(ctk.CTk):
         type_cb = ctk.CTkComboBox(form, variable=type_var, values=type_opts, width=360)
         type_cb.pack(pady=3, fill="x")
 
-        ctk.CTkLabel(form, text="REU Class (Religious Education Unit)", font=("Arial", 11, "bold")).pack(anchor="w", pady=(8, 0))
+        reu_lbl = ctk.CTkLabel(form, text="REU Class (Religious Education Unit)", font=("Arial", 11, "bold"))
+        reu_lbl.pack(anchor="w", pady=(8, 0))
         reu_var = ctk.StringVar(value="N/A")
         reu_opts = self.get_master_options("reu_class", ["N/A", "Junior Youth (JY)", "Upper Primary (UP)", "Lower Primary (LP)"])
         reu_cb = ctk.CTkComboBox(form, variable=reu_var, values=reu_opts, width=360)
@@ -4769,6 +5007,10 @@ class AutoAttendanceApp(ctk.CTk):
         ctk.CTkLabel(form, text="Area", font=("Arial", 11, "bold")).pack(anchor="w", pady=(8, 0))
         area_e = ctk.CTkEntry(form, width=360, placeholder_text="e.g. Kuala Lumpur")
         area_e.pack(pady=3, fill="x")
+
+        # Container for extra member-only profile fields
+        extra_member_frame = ctk.CTkFrame(form, fg_color="transparent")
+        extra_member_frame.pack(fill="x", pady=5)
 
         def update_age_cat_ui(dob):
             if not dob or dob == "--": 
@@ -4784,36 +5026,38 @@ class AutoAttendanceApp(ctk.CTk):
                 age_cat_var.set(cat)
             except: age_cat_var.set("")
 
-        get_dob, set_dob = self._date_picker(form, "DOB (DD-MM-YYYY)", on_change=update_age_cat_ui)
+        get_dob, set_dob = self._date_picker(extra_member_frame, "DOB (DD-MM-YYYY)", on_change=update_age_cat_ui)
 
         # Age Category Dropdown (Manual select allowed)
-        ctk.CTkLabel(form, text="Age Category", font=("Arial", 11, "bold")).pack(anchor="w", pady=(8, 0))
+        ctk.CTkLabel(extra_member_frame, text="Age Category", font=("Arial", 11, "bold")).pack(anchor="w", pady=(8, 0))
         age_cat_var = ctk.StringVar(value="")
-        age_cat_cb = ctk.CTkComboBox(form, variable=age_cat_var, width=360, 
+        age_cat_cb = ctk.CTkComboBox(extra_member_frame, variable=age_cat_var, width=360, 
                                       values=["", "Child", "Youth", "Adult", "Elder"])
         age_cat_cb.pack(pady=3, fill="x")
 
-        get_bap, set_bap = self._date_picker(form, "Date of Baptism (DD-MM-YYYY)")
+        get_bap, set_bap = self._date_picker(extra_member_frame, "Date of Baptism (DD-MM-YYYY)")
 
-        ctk.CTkLabel(form, text="Address", font=("Arial", 11, "bold")).pack(anchor="w", pady=(8, 0))
-        address_e = ctk.CTkEntry(form, width=360)
+        ctk.CTkLabel(extra_member_frame, text="Address", font=("Arial", 11, "bold")).pack(anchor="w", pady=(8, 0))
+        address_e = ctk.CTkEntry(extra_member_frame, width=360)
         address_e.pack(pady=3, fill="x")
 
-        ctk.CTkLabel(form, text="Email", font=("Arial", 11, "bold")).pack(anchor="w", pady=(8, 0))
-        email_e = ctk.CTkEntry(form, width=360)
+        ctk.CTkLabel(extra_member_frame, text="Email", font=("Arial", 11, "bold")).pack(anchor="w", pady=(8, 0))
+        email_e = ctk.CTkEntry(extra_member_frame, width=360)
         email_e.pack(pady=3, fill="x")
 
-        ctk.CTkLabel(form, text="Phone", font=("Arial", 11, "bold")).pack(anchor="w", pady=(8, 0))
-        phone_e = ctk.CTkEntry(form, width=360)
+        ctk.CTkLabel(extra_member_frame, text="Phone", font=("Arial", 11, "bold")).pack(anchor="w", pady=(8, 0))
+        phone_e = ctk.CTkEntry(extra_member_frame, width=360)
         phone_e.pack(pady=3, fill="x")
 
         hs_var = tk.BooleanVar(value=False)
-        hs_cb = ctk.CTkCheckBox(form, text="Holy Spirit Received", variable=hs_var, font=("Arial", 12, "bold"))
+        hs_cb = ctk.CTkCheckBox(extra_member_frame, text="Holy Spirit Received", variable=hs_var, font=("Arial", 12, "bold"))
         hs_cb.pack(anchor="w", pady=10)
 
-        ctk.CTkLabel(form, text="Remark", font=("Arial", 11, "bold")).pack(anchor="w", pady=(8, 0))
-        remark_e = ctk.CTkTextbox(form, width=360, height=70) # ~3 lines
+        ctk.CTkLabel(extra_member_frame, text="Remark", font=("Arial", 11, "bold")).pack(anchor="w", pady=(8, 0))
+        remark_e = ctk.CTkTextbox(extra_member_frame, width=360, height=70) # ~3 lines
         remark_e.pack(pady=3, fill="x")
+
+        toggle_action_mode()
 
 
         def save():
@@ -4823,6 +5067,17 @@ class AutoAttendanceApp(ctk.CTk):
                 return
 
             m_type = type_var.get()
+            title_val = title_var.get().strip()
+
+            if action_var.get() == "register_guest":
+                full_name = f"{title_val} {name}".strip() if title_val else name
+                self.backend.identify_unknown(att_id, full_name, None, m_type)
+                self.refresh_stats()
+                self.refresh_logs_table()
+                self.refresh_captured_attendees_list()
+                popup.destroy()
+                messagebox.showinfo("Done", f"Guest identified & marked attendance as '{full_name}'.", parent=popup)
+                return
 
             # --- DUPLICATE CHECK ---
             target_code = existing_code_e.get().strip() if action_var.get() == "link_existing" else None
@@ -4842,8 +5097,12 @@ class AutoAttendanceApp(ctk.CTk):
                     messagebox.showwarning("Missing", "Member code required.", parent=popup)
                     return
                 try:
-                    # Update member title/details if needed
-                    self.backend.register_member({"name": name, "title": title_cb.get(), "type": m_type}, force_code=code)
+                    member_data = {"name": name, "title": title_cb.get(), "type": m_type}
+                    if replace_face_var.get():
+                        member_data["image_path"] = img_path
+
+                    # Update member title/details/photo
+                    self.backend.register_member(member_data, force_code=code)
                     # Promote attendance row
                     self.backend.identify_unknown(att_id, name, code, m_type)
                 except Exception as e:
@@ -4886,7 +5145,7 @@ class AutoAttendanceApp(ctk.CTk):
                     "has_holy_spirit": hs_var.get(),
                     "remark": remark_e.get("1.0", "end").strip(),
                     "age_category": age_cat_var.get(),
-                    "image_path": img_path
+                    "image_path": (img_path if save_face_db_var.get() else "")
                 }
                 prefix = self.settings.get("member_prefix", "")
                 code = self.backend.register_member(data, prefix=prefix)
@@ -4946,10 +5205,11 @@ class AutoAttendanceApp(ctk.CTk):
                 rows = conn.execute("""
                     SELECT member_code, name, type 
                     FROM members 
-                    WHERE name LIKE ? OR member_code LIKE ? 
+                    WHERE (is_disabled = 0 OR is_disabled IS NULL)
+                      AND (LOWER(name) LIKE ? OR LOWER(member_code) LIKE ?) 
                     ORDER BY member_code""", (f"%{q}%", f"%{q}%")).fetchall()
             else:
-                rows = conn.execute("SELECT member_code, name, type FROM members ORDER BY member_code").fetchall()
+                rows = conn.execute("SELECT member_code, name, type FROM members WHERE (is_disabled = 0 OR is_disabled IS NULL) ORDER BY member_code").fetchall()
             conn.close()
 
             if not rows:
@@ -4984,13 +5244,51 @@ class AutoAttendanceApp(ctk.CTk):
     def on_edit_member(self, code):
         self.member_dialog("Edit Member", code)
 
-    def on_delete_member(self, code):
-        if messagebox.askyesno("Delete", f"Delete member {code}?"):
-            conn = sqlite3.connect("database/attendance.db")
-            conn.execute("DELETE FROM members WHERE member_code=?", (code,))
-            conn.commit()
-            conn.close()
+    def on_disable_member(self, code):
+        conn = sqlite3.connect("database/attendance.db")
+        m = conn.execute("SELECT name FROM members WHERE member_code=?", (code,)).fetchone()
+        conn.close()
+        m_name = m[0] if m else code
+
+        dialog = ctk.CTkInputDialog(
+            text=f"Disable Member: {code} ({m_name})\n\n"
+                 f"Enter remark/reason for disabling (e.g. Passed away, Moved to another country):\n"
+                 f"(Disabled members are hidden from recognition & counts, but attendance history is kept)",
+            title="Disable Member"
+        )
+        remark = dialog.get_input()
+        if remark is not None:
+            self.backend.disable_member(code, remark)
             self.refresh_member_table()
+            self.refresh_stats()
+            messagebox.showinfo("Member Disabled", f"Member {code} ({m_name}) disabled.\nReason: {remark or 'None'}")
+
+    def on_enable_member(self, code):
+        conn = sqlite3.connect("database/attendance.db")
+        m = conn.execute("SELECT name FROM members WHERE member_code=?", (code,)).fetchone()
+        conn.close()
+        m_name = m[0] if m else code
+
+        if messagebox.askyesno("Re-enable Member", f"Re-enable member {code} ({m_name})?\n\nFace recognition & active member counts will be restored."):
+            self.backend.enable_member(code)
+            self.refresh_member_table()
+            self.refresh_stats()
+            messagebox.showinfo("Member Re-enabled", f"Member {code} ({m_name}) is active again.")
+
+    def on_delete_member(self, code):
+        conn = sqlite3.connect("database/attendance.db")
+        m = conn.execute("SELECT name FROM members WHERE member_code=?", (code,)).fetchone()
+        conn.close()
+        m_name = m[0] if m else code
+
+        if messagebox.askyesno("Delete Member", 
+                               f"Are you sure you want to permanently delete member {code} ({m_name})?\n\n"
+                               f"• Database record and face photo will be deleted.\n"
+                               f"• Historical attendance records will NOT be deleted."):
+            self.backend.delete_member(code)
+            self.refresh_member_table()
+            self.refresh_stats()
+            messagebox.showinfo("Deleted", f"Member {code} ({m_name}) deleted successfully.")
 
     def _date_picker(self, parent, label, existing_val="", readonly=False, default_today=False, on_change=None):
         """Wheel-style date picker. Returns a callable get() → 'DD-MM-YYYY' or ''."""

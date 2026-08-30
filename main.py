@@ -208,8 +208,8 @@ class InsightFaceAttendance:
         self.known_face_encodings = []
         self.known_face_names     = []
         self.known_face_ids       = []
-        self.load_known_faces()
         self.init_database()
+        self.load_known_faces()
 
     # ── Face cache ────────────────────────────────────────────────────────────
 
@@ -222,6 +222,33 @@ class InsightFaceAttendance:
         current_files = {f: os.path.getmtime(os.path.join(self.face_dir, f)) 
                          for f in os.listdir(self.face_dir) 
                          if f.lower().endswith(('.jpg', '.jpeg', '.png'))}
+
+        active_member_codes = set()
+        all_db_member_codes = set()
+        if os.path.exists(self.db_path):
+            try:
+                conn = sqlite3.connect(self.db_path)
+                rows = conn.execute("SELECT member_code, is_disabled FROM members").fetchall()
+                conn.close()
+                for code, dis in rows:
+                    if code:
+                        all_db_member_codes.add(code)
+                        if not dis:
+                            active_member_codes.add(code)
+            except Exception as e:
+                print(f"[CACHE] DB active members query error: {e}")
+
+        # Clean up orphan face photo files for members deleted from database
+        for fn in list(current_files.keys()):
+            stem = os.path.splitext(fn)[0]
+            p_id = stem.split('_', 1)[0] if '_' in stem else stem
+            if all_db_member_codes and p_id and p_id not in all_db_member_codes:
+                try:
+                    os.remove(os.path.join(self.face_dir, fn))
+                    print(f"[CACHE] Removed orphan face photo of deleted member: {fn}")
+                    del current_files[fn]
+                except Exception as e:
+                    print(f"[WARN] Failed to delete orphan photo {fn}: {e}")
 
         cache_map = {}
         if not force_rebuild and os.path.exists(self.cache_file):
@@ -277,9 +304,11 @@ class InsightFaceAttendance:
         enc, names, ids = [], [], []
         for fn in sorted(updated_map.keys()):
             item = updated_map[fn]
-            enc.append(item['enc'])
-            names.append(item['name'])
-            ids.append(item['id'])
+            # Exclude disabled members or deleted members from active face recognition
+            if not active_member_codes or item['id'] in active_member_codes:
+                enc.append(item['enc'])
+                names.append(item['name'])
+                ids.append(item['id'])
 
         self.known_face_encodings = enc
         self.known_face_names     = names
@@ -299,7 +328,7 @@ class InsightFaceAttendance:
         if os.path.exists(self.db_path):
             try:
                 conn = sqlite3.connect(self.db_path)
-                rows = conn.execute("SELECT member_code, type, title FROM members").fetchall()
+                rows = conn.execute("SELECT member_code, type, title FROM members WHERE (is_disabled = 0 OR is_disabled IS NULL)").fetchall()
                 conn.close()
                 for code, mtype, title in rows:
                     self.known_member_meta[code] = {
@@ -387,6 +416,10 @@ class InsightFaceAttendance:
             c.execute("ALTER TABLE members ADD COLUMN title TEXT DEFAULT ''")
         if 'reu_class' not in mcols:
             c.execute("ALTER TABLE members ADD COLUMN reu_class TEXT DEFAULT ''")
+        if 'is_disabled' not in mcols:
+            c.execute("ALTER TABLE members ADD COLUMN is_disabled INTEGER DEFAULT 0")
+        if 'disable_remark' not in mcols:
+            c.execute("ALTER TABLE members ADD COLUMN disable_remark TEXT DEFAULT ''")
         
         # Master Data table creation & initial seed
         c.execute('''CREATE TABLE IF NOT EXISTS master_data (
@@ -754,6 +787,15 @@ class InsightFaceAttendance:
             safe_name = "".join([c for c in data.get('name','') if c.isalnum() or c in (' ','_')]).strip()
             ext = os.path.splitext(img_path)[1] or ".jpg"
             new_path = os.path.join(self.face_dir, f"{code}_{safe_name}{ext}")
+
+            # Remove old photos for this code if overwriting/replacing photo
+            if os.path.exists(self.face_dir):
+                for fn in os.listdir(self.face_dir):
+                    if fn.startswith(f"{code}_") and os.path.join(self.face_dir, fn) != new_path:
+                        try:
+                            os.remove(os.path.join(self.face_dir, fn))
+                        except Exception:
+                            pass
             try:
                 shutil.copy2(img_path, new_path)
                 self.load_known_faces()
@@ -761,6 +803,51 @@ class InsightFaceAttendance:
                 print(f"[WARN] Photo copy error: {e}")
 
         return code
+
+    def delete_member(self, code):
+        """Permanently delete member from database and remove face photo. History attendance is kept intact."""
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
+        c.execute("DELETE FROM members WHERE member_code=?", (code,))
+        conn.commit()
+        conn.close()
+
+        # Delete photo file(s) from registered_faces
+        if os.path.exists(self.face_dir):
+            for fn in os.listdir(self.face_dir):
+                if fn.startswith(f"{code}_"):
+                    try:
+                        os.remove(os.path.join(self.face_dir, fn))
+                    except Exception as e:
+                        print(f"[WARN] Failed to delete face photo {fn}: {e}")
+
+        # Update face cache incrementally so recognition updates immediately without hanging
+        self.load_known_faces()
+        return True
+
+    def disable_member(self, code, remark=""):
+        """Disable a member (e.g. passed away, moved to another country). Excludes from recognition & active counts."""
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
+        c.execute("UPDATE members SET is_disabled = 1, disable_remark = ? WHERE member_code = ?", (remark.strip(), code))
+        conn.commit()
+        conn.close()
+
+        # Reload faces incrementally so disabled face is removed from recognition memory
+        self.load_known_faces()
+        return True
+
+    def enable_member(self, code):
+        """Re-enable a disabled member. Restores face recognition & active count."""
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
+        c.execute("UPDATE members SET is_disabled = 0 WHERE member_code = ?", (code,))
+        conn.commit()
+        conn.close()
+
+        # Reload faces incrementally so face is included back in recognition memory
+        self.load_known_faces()
+        return True
 
     # ── Sessions ──────────────────────────────────────────────────────────────
 
@@ -1137,7 +1224,7 @@ class InsightFaceAttendance:
     def get_summary(self, default_area=None):
         conn = sqlite3.connect(self.db_path)
         # Denominator: Total 'Area Member' DB count
-        area_total = conn.execute("SELECT COUNT(*) FROM members WHERE type='Area Member'").fetchone()[0]
+        area_total = conn.execute("SELECT COUNT(*) FROM members WHERE type='Area Member' AND (is_disabled = 0 OR is_disabled IS NULL)").fetchone()[0]
 
         if self.active_session_id:
             sid = self.active_session_id
@@ -1201,7 +1288,7 @@ class InsightFaceAttendance:
         import pandas as pd
         conn = sqlite3.connect(self.db_path)
         
-        area_member_db_count = conn.execute("SELECT COUNT(*) FROM members WHERE type='Area Member'").fetchone()[0]
+        area_member_db_count = conn.execute("SELECT COUNT(*) FROM members WHERE type='Area Member' AND (is_disabled = 0 OR is_disabled IS NULL)").fetchone()[0]
 
         if period_type == 'weekly':
             date_fmt = '%Y-W%W'
@@ -1275,7 +1362,7 @@ class InsightFaceAttendance:
         import pandas as pd
         conn = sqlite3.connect(self.db_path)
         
-        area_member_db_count = conn.execute("SELECT COUNT(*) FROM members WHERE type='Area Member'").fetchone()[0]
+        area_member_db_count = conn.execute("SELECT COUNT(*) FROM members WHERE type='Area Member' AND (is_disabled = 0 OR is_disabled IS NULL)").fetchone()[0]
 
         # Convert Period String back to SQL friendly match
         if period_type == 'weekly':
