@@ -421,6 +421,12 @@ class InsightFaceAttendance:
         if 'disable_remark' not in mcols:
             c.execute("ALTER TABLE members ADD COLUMN disable_remark TEXT DEFAULT ''")
         
+        # Custom Field Metadata Table
+        c.execute('''CREATE TABLE IF NOT EXISTS custom_field_metadata (
+            field_name TEXT PRIMARY KEY,
+            field_type TEXT,
+            table_name TEXT DEFAULT 'members')''')
+
         # Master Data table creation & initial seed
         c.execute('''CREATE TABLE IF NOT EXISTS master_data (
             id INTEGER PRIMARY KEY AUTOINCREMENT,

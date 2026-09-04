@@ -3322,50 +3322,80 @@ class AutoAttendanceApp(ctk.CTk):
 
     # ── SQL Data Page ─────────────────────────────────────────────────────────
 
+    # ── SQL Data Page ─────────────────────────────────────────────────────────
+
     def init_sql_page(self):
         f = ctk.CTkFrame(self.container, fg_color="#F8F9FA", corner_radius=10)
         self.frames["sql"] = f
         
         hdr = ctk.CTkFrame(f, fg_color="transparent")
-        hdr.pack(fill="x", padx=20, pady=20)
+        hdr.pack(fill="x", padx=20, pady=(20, 10))
         
-        ctk.CTkLabel(hdr, text="🗄 SQL Database Management", font=("Arial", 24, "bold")).pack(side="left")
+        ctk.CTkLabel(hdr, text="🗄 SQL Database & Custom Fields Manager", font=("Arial", 24, "bold"), text_color="#1F2937").pack(side="left")
         
         ctrl = ctk.CTkFrame(f, fg_color="#FFFFFF", corner_radius=8, border_width=1, border_color="#E5E7EB")
         ctrl.pack(fill="x", padx=20, pady=(0, 15))
         
-        ctk.CTkLabel(ctrl, text="Table:", font=("Arial", 12, "bold")).pack(side="left", padx=(20, 5), pady=15)
+        ctk.CTkLabel(ctrl, text="Table:", font=("Arial", 12, "bold")).pack(side="left", padx=(15, 5), pady=15)
         self.sql_table_var = ctk.StringVar(value="members")
-        self.sql_table_cb = ctk.CTkComboBox(ctrl, variable=self.sql_table_var, values=["members", "attendance", "sessions", "org_charts"], command=lambda _: self.refresh_sql_table())
+        self.sql_table_cb = ctk.CTkComboBox(ctrl, variable=self.sql_table_var, values=["members", "attendance", "sessions", "org_charts"], command=lambda _: self.refresh_sql_table(), width=130)
         self.sql_table_cb.pack(side="left", padx=5)
         
-        ctk.CTkButton(ctrl, text="🔄 Refresh", width=100, command=self.refresh_sql_table).pack(side="left", padx=20)
+        ctk.CTkButton(ctrl, text="🔄 Refresh", width=90, command=self.refresh_sql_table).pack(side="left", padx=10)
         
-        # Add Column Tool
-        ctk.CTkLabel(ctrl, text="Add New Column:", font=("Arial", 11, "bold")).pack(side="left", padx=(40, 5))
-        self.new_col_name = ctk.CTkEntry(ctrl, width=150, placeholder_text="column_name")
+        # Add Column Tooling with Field Type Selector
+        ctk.CTkLabel(ctrl, text="Add New Field:", font=("Arial", 11, "bold")).pack(side="left", padx=(25, 5))
+        self.new_col_name = ctk.CTkEntry(ctrl, width=140, placeholder_text="field_name")
         self.new_col_name.pack(side="left", padx=5)
-        ctk.CTkButton(ctrl, text="+ Add", width=60, fg_color="#10B981", command=self.on_sql_add_column).pack(side="left", padx=5)
+
+        ctk.CTkLabel(ctrl, text="Type:", font=("Arial", 11, "bold")).pack(side="left", padx=(10, 5))
+        self.new_col_type_var = ctk.StringVar(value="Single Line (1 line fill)")
+        self.new_col_type_cb = ctk.CTkComboBox(ctrl, variable=self.new_col_type_var, 
+                                               values=["Single Line (1 line fill)", "Multiple Line (3 line fill)", "Date"], 
+                                               width=175)
+        self.new_col_type_cb.pack(side="left", padx=5)
+
+        ctk.CTkButton(ctrl, text="➕ Add Field", width=90, fg_color="#10B981", hover_color="#059669", font=("Arial", 11, "bold"), command=self.on_sql_add_column).pack(side="left", padx=10)
 
         self.sql_scroll = ctk.CTkScrollableFrame(f, fg_color="#FFFFFF", corner_radius=8, border_width=1, border_color="#E5E7EB")
         self.sql_scroll.pack(fill="both", expand=True, padx=20, pady=(0, 20))
         
     def on_sql_add_column(self):
-        col = self.new_col_name.get().strip().replace(" ", "_")
+        raw_col = self.new_col_name.get().strip()
+        col = raw_col.replace(" ", "_").lower()
         table = self.sql_table_var.get()
-        if not col: return
+        type_str = self.new_col_type_var.get()
         
-        if messagebox.askyesno("Confirm", f"Add column '{col}' to table '{table}'?"):
+        type_map = {"Single Line (1 line fill)": "single_line", "Multiple Line (3 line fill)": "multi_line", "Date": "date"}
+        f_type = type_map.get(type_str, "single_line")
+
+        if not col:
+            messagebox.showwarning("Warning", "Field name cannot be empty.")
+            return
+
+        # Check existing table columns
+        conn = sqlite3.connect("database/attendance.db")
+        cursor = conn.cursor()
+        cursor.execute(f"PRAGMA table_info({table})")
+        existing_cols = [r[1].lower() for r in cursor.fetchall()]
+        
+        if col in existing_cols:
+            conn.close()
+            messagebox.showwarning("Warning", f"Field '{col}' already exists in table '{table}'.")
+            return
+
+        if messagebox.askyesno("Confirm Add Field", f"Add custom field '{col}' ({type_str}) to table '{table}'?"):
             try:
-                conn = sqlite3.connect("database/attendance.db")
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} TEXT")
+                conn.execute("INSERT OR REPLACE INTO custom_field_metadata (field_name, field_type, table_name) VALUES (?, ?, ?)", (col, f_type, table))
                 conn.commit()
                 conn.close()
-                messagebox.showinfo("Success", f"Column '{col}' added successfully.")
+                messagebox.showinfo("Success", f"Custom field '{col}' added successfully.")
                 self.new_col_name.delete(0, 'end')
                 self.refresh_sql_table()
             except Exception as e:
-                messagebox.showerror("Error", f"Failed to add column: {e}")
+                conn.close()
+                messagebox.showerror("Error", f"Failed to add field: {e}")
 
     def refresh_sql_table(self):
         for w in self.sql_scroll.winfo_children(): w.destroy()
@@ -3373,14 +3403,99 @@ class AutoAttendanceApp(ctk.CTk):
         table = self.sql_table_var.get()
         conn = sqlite3.connect("database/attendance.db")
         cursor = conn.cursor()
+        
+        # ── 1. CUSTOM FIELDS MANAGER (If viewing 'members' table) ──
+        if table == "members":
+            mgr_f = ctk.CTkFrame(self.sql_scroll, fg_color="#F9FAFB", border_width=1, border_color="#E5E7EB", corner_radius=8)
+            mgr_f.pack(fill="x", padx=10, pady=10)
+
+            hdr_f = ctk.CTkFrame(mgr_f, fg_color="transparent")
+            hdr_f.pack(fill="x", padx=15, pady=(12, 6))
+
+            ctk.CTkLabel(hdr_f, text="🛡️ Custom SQL Fields Manager (Review / Edit / Delete)", font=("Arial", 14, "bold"), text_color="#1E3A8A").pack(side="left")
+            ctk.CTkLabel(mgr_f, text="Fields added here will appear in the Add Member & Edit Member popups. Deletion and configuration of custom fields can only be done here.", font=("Arial", 11), text_color="#6B7280", anchor="w").pack(fill="x", padx=15, pady=(0, 10))
+
+            cursor.execute("PRAGMA table_info(members)")
+            db_cols = [r[1].lower() for r in cursor.fetchall()]
+            
+            # Fetch type metadata
+            cursor.execute("SELECT field_name, field_type FROM custom_field_metadata")
+            meta_types = {r[0].lower(): r[1] for r in cursor.fetchall()}
+
+            standard_fields = ["member_code", "name", "type", "age", "dob", "baptism_date", 
+                               "address", "email", "phone", "has_holy_spirit", "image_path", 
+                               "registration_date", "area", "remark", "age_category", "title",
+                               "reu_class", "is_disabled", "disable_remark"]
+            custom_cols = [c for c in db_cols if c not in standard_fields]
+
+            if not custom_cols:
+                ctk.CTkLabel(mgr_f, text="No custom fields added yet. Enter a field name above and click '+ Add Field' to create one!", font=("Arial", 12, "italic"), text_color="#9CA3AF").pack(pady=15)
+            else:
+                type_labels = {"single_line": "Single Line (1 line fill)", "multi_line": "Multiple Line (3 line fill)", "date": "Date Picker"}
+                
+                grid_card = ctk.CTkFrame(mgr_f, fg_color="#FFFFFF", border_width=1, border_color="#E5E7EB", corner_radius=6)
+                grid_card.pack(fill="x", padx=15, pady=(0, 15))
+
+                # Header row
+                th = ctk.CTkFrame(grid_card, fg_color="#F3F4F6", height=32, corner_radius=4)
+                th.pack(fill="x", padx=5, pady=5)
+                ctk.CTkLabel(th, text="FIELD NAME", font=("Arial", 11, "bold"), text_color="#374151", width=180, anchor="w").pack(side="left", padx=12)
+                ctk.CTkLabel(th, text="INPUT TYPE / FORMAT", font=("Arial", 11, "bold"), text_color="#374151", width=220, anchor="w").pack(side="left", padx=12)
+                ctk.CTkLabel(th, text="ACTIONS", font=("Arial", 11, "bold"), text_color="#374151", anchor="w").pack(side="left", padx=12)
+
+                for f_name in custom_cols:
+                    tr = ctk.CTkFrame(grid_card, fg_color="transparent")
+                    tr.pack(fill="x", padx=5, pady=3)
+
+                    f_type_key = meta_types.get(f_name, "single_line")
+                    f_type_disp = type_labels.get(f_type_key, "Single Line (1 line fill)")
+
+                    ctk.CTkLabel(tr, text=f_name.replace("_", " ").title(), font=("Arial", 12, "bold"), text_color="#1F2937", width=180, anchor="w").pack(side="left", padx=12)
+                    
+                    badge = ctk.CTkLabel(tr, text=f_type_disp, font=("Arial", 11, "bold"), fg_color="#EEF2FF", text_color="#4F46E5", corner_radius=4, width=200, height=26)
+                    badge.pack(side="left", padx=12)
+
+                    act_f = ctk.CTkFrame(tr, fg_color="transparent")
+                    act_f.pack(side="left", padx=12)
+
+                    ctk.CTkButton(act_f, text="✏️ Edit Type", width=95, height=26, fg_color="#F3F4F6", text_color="#374151", hover_color="#E5E7EB", font=("Arial", 10, "bold"),
+                                  command=lambda fn=f_name, ft=f_type_key: self.edit_custom_field(fn, ft)).pack(side="left", padx=3)
+                    
+                    ctk.CTkButton(act_f, text="🗑️ Delete Field", width=105, height=26, fg_color="#EF4444", hover_color="#DC2626", font=("Arial", 10, "bold"),
+                                  command=lambda fn=f_name: self.delete_custom_field(fn)).pack(side="left", padx=3)
+
+        # ── 2. RAW TABLE PREVIEW ──
+        ctk.CTkLabel(self.sql_scroll, text=f"📊 Raw Table Data Preview: {table}", font=("Arial", 14, "bold"), text_color="#1F2937").pack(anchor="w", padx=10, pady=(15, 5))
+
         try:
             cursor.execute(f"SELECT * FROM {table} LIMIT 100")
             rows = cursor.fetchall()
             cols = [description[0] for description in cursor.description]
             conn.close()
-        except:
-            conn.close()
-            return
+
+            if not cols:
+                ctk.CTkLabel(self.sql_scroll, text="No columns found.", font=("Arial", 12)).pack(pady=10)
+                return
+
+            tbl_frame = ctk.CTkScrollableFrame(self.sql_scroll, orientation="horizontal", height=250, fg_color="transparent")
+            tbl_frame.pack(fill="x", padx=10, pady=5)
+
+            # Headers
+            hdr_row = ctk.CTkFrame(tbl_frame, fg_color="#E5E7EB", height=30)
+            hdr_row.pack(fill="x")
+            for c in cols:
+                ctk.CTkLabel(hdr_row, text=c, font=("Arial", 11, "bold"), width=120, anchor="w").pack(side="left", padx=4, pady=4)
+
+            # Data rows
+            for r in rows:
+                r_frame = ctk.CTkFrame(tbl_frame, fg_color="#FFFFFF", height=28)
+                r_frame.pack(fill="x", pady=1)
+                for val in r:
+                    ctk.CTkLabel(r_frame, text=str(val if val is not None else "")[:20], font=("Arial", 10), width=120, anchor="w").pack(side="left", padx=4, pady=2)
+        except Exception as e:
+            try: conn.close()
+            except: pass
+            ctk.CTkLabel(self.sql_scroll, text=f"Error previewing table: {e}", text_color="red").pack(pady=10)
 
     # ── Image Cache Management Page ───────────────────────────────────────────
 
@@ -5128,7 +5243,7 @@ class AutoAttendanceApp(ctk.CTk):
                 
                 standard_fields = ["member_code", "name", "type", "age", "dob", "baptism_date", 
                                    "address", "email", "phone", "has_holy_spirit", "image_path", 
-                                   "registration_date", "area", "remark", "age_category", "title", "reu_class"]
+                                   "registration_date", "area", "remark", "age_category", "title", "reu_class", "is_disabled", "disable_remark"]
                 extra_fields = [c for c in db_cols if c not in standard_fields]
                 
                 data = {
@@ -5330,66 +5445,112 @@ class AutoAttendanceApp(ctk.CTk):
 
         return get_val, set_val
 
-    def delete_custom_field(self, field_name, parent_dialog):
-        if messagebox.askyesno("Delete Custom Field", f"Are you sure you want to delete the field '{field_name}'?\n\nWARNING: This will permanently remove this field and ALL its data for ALL members in the database.", parent=parent_dialog):
+    def delete_custom_field(self, field_name, parent_dialog=None):
+        opts = {"parent": parent_dialog} if parent_dialog else {}
+        if messagebox.askyesno("Delete Custom Field", f"Are you sure you want to delete the field '{field_name}'?\n\nWARNING: This will permanently remove this field and ALL its data for ALL members in the database.", **opts):
             try:
                 conn = sqlite3.connect("database/attendance.db")
                 conn.execute(f"ALTER TABLE members DROP COLUMN {field_name}")
+                conn.execute("DELETE FROM custom_field_metadata WHERE field_name = ?", (field_name,))
                 conn.commit()
                 conn.close()
-                messagebox.showinfo("Success", f"Field '{field_name}' has been deleted. Please close and reopen the dialog to see changes.", parent=parent_dialog)
-                parent_dialog.destroy()
+                messagebox.showinfo("Success", f"Field '{field_name}' has been deleted.", **opts)
+                if parent_dialog:
+                    parent_dialog.destroy()
+                if hasattr(self, "refresh_sql_table"):
+                    self.refresh_sql_table()
+                self.refresh_member_table()
             except Exception as e:
-                messagebox.showerror("Error", f"Failed to delete field: {e}", parent=parent_dialog)
+                messagebox.showerror("Error", f"Failed to delete field: {e}", **opts)
+
+    def edit_custom_field(self, field_name, current_type):
+        dialog = ctk.CTkToplevel(self)
+        dialog.title(f"Edit Field: {field_name}")
+        dialog.geometry("380x260")
+        dialog.attributes("-topmost", True)
+        dialog.grab_set()
+
+        ctk.CTkLabel(dialog, text=f"Edit Custom Field: {field_name.replace('_', ' ').upper()}", font=("Arial", 14, "bold")).pack(pady=(20, 10))
+        
+        type_map_rev = {"single_line": "Single Line (1 line fill)", "multi_line": "Multiple Line (3 line fill)", "date": "Date"}
+        curr_label = type_map_rev.get(current_type, "Single Line (1 line fill)")
+        
+        ctk.CTkLabel(dialog, text="Field Type / Input Style:", font=("Arial", 12, "bold")).pack(anchor="w", padx=30, pady=(10, 2))
+        type_var = ctk.StringVar(value=curr_label)
+        type_cb = ctk.CTkComboBox(dialog, variable=type_var, values=["Single Line (1 line fill)", "Multiple Line (3 line fill)", "Date"], width=320)
+        type_cb.pack(padx=30, pady=5)
+
+        def save_edit():
+            new_label = type_var.get()
+            type_map = {"Single Line (1 line fill)": "single_line", "Multiple Line (3 line fill)": "multi_line", "Date": "date"}
+            new_type = type_map.get(new_label, "single_line")
+
+            try:
+                conn = sqlite3.connect("database/attendance.db")
+                conn.execute("INSERT OR REPLACE INTO custom_field_metadata (field_name, field_type, table_name) VALUES (?, ?, 'members')", (field_name, new_type))
+                conn.commit()
+                conn.close()
+                messagebox.showinfo("Saved", f"Field '{field_name}' type updated to '{new_label}'.", parent=dialog)
+                dialog.destroy()
+                if hasattr(self, "refresh_sql_table"):
+                    self.refresh_sql_table()
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to update field: {e}", parent=dialog)
+
+        ctk.CTkButton(dialog, text="💾 Save Changes", fg_color="#10B981", hover_color="#059669", width=180, height=36, command=save_edit).pack(pady=20)
 
     def member_dialog(self, title, code=None, readonly=False):
         dialog = ctk.CTkToplevel(self)
         dialog.title(title)
-        dialog.geometry("520x780")
+        dialog.geometry("540x800")
         dialog.attributes("-topmost", True)
         dialog.grab_set()
-
-        scroll = ctk.CTkScrollableFrame(dialog, fg_color="transparent")
-        scroll.pack(fill="both", expand=True, padx=20, pady=20)
 
         # Load existing
         existing = {}
         db_cols = []
         conn = sqlite3.connect("database/attendance.db")
         try:
-            # Get columns dynamically
             cursor = conn.cursor()
             cursor.execute("PRAGMA table_info(members)")
             db_cols = [row[1].lower() for row in cursor.fetchall()]
             
             if code:
-                # Use pandas for easy dict conversion
                 df = pd.read_sql("SELECT * FROM members WHERE member_code=?", conn, params=[code])
                 if not df.empty:
-                    # Normalize keys to lowercase for robust matching
                     existing = {str(k).lower(): v for k, v in df.iloc[0].to_dict().items()}
         except: pass
         finally: conn.close()
 
+        # Custom Field Types map from DB
+        field_types = {}
+        try:
+            conn = sqlite3.connect("database/attendance.db")
+            rows = conn.execute("SELECT field_name, field_type FROM custom_field_metadata").fetchall()
+            field_types = {r[0].lower(): r[1] for r in rows}
+            conn.close()
+        except: pass
+
         standard_fields = ["member_code", "name", "type", "age", "dob", "baptism_date", 
                            "address", "email", "phone", "has_holy_spirit", "image_path", 
-                           "registration_date", "area", "remark", "age_category", "title"]
+                           "registration_date", "area", "remark", "age_category", "title",
+                           "reu_class", "is_disabled", "disable_remark"]
         extra_fields = [c for c in db_cols if c not in standard_fields]
 
-        # ── Profile Photo ──────────────────────────────────────────────────────
+        # ── 1. FIXED TOP PHOTO CONTAINER ──────────────────────────────────────
         self.dialog_img_path = existing.get("image_path", "")
 
-        photo_frame = ctk.CTkFrame(scroll, fg_color="transparent")
-        photo_frame.pack(pady=(5, 10), fill="x")
+        photo_frame = ctk.CTkFrame(dialog, fg_color="#F8F9FA", corner_radius=8)
+        photo_frame.pack(side="top", fill="x", padx=15, pady=(15, 5))
 
-        photo_lbl = ctk.CTkLabel(photo_frame, text="📷 No Photo", width=120, height=120, fg_color="#E9ECEF", corner_radius=10)
-        photo_lbl.pack(side="left", padx=10)
+        photo_lbl = ctk.CTkLabel(photo_frame, text="📷 No Photo", width=110, height=110, fg_color="#E9ECEF", corner_radius=10)
+        photo_lbl.pack(side="left", padx=15, pady=10)
 
         def update_photo_preview(path):
             if path and os.path.exists(path):
                 try:
-                    pil = Image.open(path).resize((120, 120))
-                    ci = ctk.CTkImage(light_image=pil, dark_image=pil, size=(120, 120))
+                    pil = Image.open(path).resize((110, 110))
+                    ci = ctk.CTkImage(light_image=pil, dark_image=pil, size=(110, 110))
                     photo_lbl.configure(image=ci, text="")
                     photo_lbl.image = ci
                     self.dialog_img_path = path
@@ -5399,7 +5560,7 @@ class AutoAttendanceApp(ctk.CTk):
             update_photo_preview(self.dialog_img_path)
 
         btn_frame = ctk.CTkFrame(photo_frame, fg_color="transparent")
-        btn_frame.pack(side="left", padx=10)
+        btn_frame.pack(side="left", padx=15, pady=10)
 
         def browse_photo():
             p = filedialog.askopenfilename(filetypes=[("Image", "*.png *.jpg *.jpeg")])
@@ -5415,8 +5576,16 @@ class AutoAttendanceApp(ctk.CTk):
                 messagebox.showwarning("Error", "Camera not active. Please ensure the dashboard camera is running.", parent=dialog)
 
         if not readonly:
-            ctk.CTkButton(btn_frame, text="Browse File", width=120, command=browse_photo).pack(pady=5)
-            ctk.CTkButton(btn_frame, text="Take Photo", width=120, command=capture_photo).pack(pady=5)
+            ctk.CTkButton(btn_frame, text="Browse File", width=120, height=32, command=browse_photo).pack(pady=4)
+            ctk.CTkButton(btn_frame, text="Take Photo", width=120, height=32, command=capture_photo).pack(pady=4)
+
+        # ── 2. FIXED BOTTOM ACTION FOOTER ─────────────────────────────────────
+        footer_frame = ctk.CTkFrame(dialog, fg_color="#F8F9FA", corner_radius=8)
+        footer_frame.pack(side="bottom", fill="x", padx=15, pady=(5, 15))
+
+        # ── 3. MIDDLE SCROLLABLE FORM CONTAINER ────────────────────────────────
+        scroll = ctk.CTkScrollableFrame(dialog, fg_color="transparent")
+        scroll.pack(side="top", fill="both", expand=True, padx=15, pady=5)
 
         # ── Name ──────────────────────────────────────────────────────────────
         ctk.CTkLabel(scroll, text="Name", font=("Arial", 12, "bold")).pack(anchor="w", pady=(10, 0))
@@ -5513,26 +5682,35 @@ class AutoAttendanceApp(ctk.CTk):
             if readonly: remark_e.configure(state="disabled")
             remark_e.pack(pady=4)
 
-        # ── Extra Fields (SQL Custom) ──
+        # ── Custom SQL Add-on Fields (Rendered directly as normal fields) ──────
         extra_entries = {}
         if extra_fields:
-            ctk.CTkFrame(scroll, height=2, fg_color="#E5E7EB").pack(fill="x", pady=20)
-            ctk.CTkLabel(scroll, text="🛡️ Extra Information (Custom SQL Fields)", font=("Arial", 13, "bold"), text_color="#6366F1").pack(anchor="w", pady=(0, 10))
-            
             for f_name in extra_fields:
-                f_hdr = ctk.CTkFrame(scroll, fg_color="transparent")
-                f_hdr.pack(fill="x", pady=(8, 0))
-                ctk.CTkLabel(f_hdr, text=f_name.replace("_", " ").upper(), font=("Arial", 11, "bold")).pack(side="left")
-                if not readonly and self.is_admin:
-                    btn_del = ctk.CTkButton(f_hdr, text="Delete Field", fg_color="#EF4444", hover_color="#DC2626", width=80, height=24, font=("Arial", 10, "bold"), command=lambda f=f_name: self.delete_custom_field(f, dialog))
-                    btn_del.pack(side="right")
+                f_label = f_name.replace("_", " ").title()
+                f_type = field_types.get(f_name, "single_line")
+                f_val = existing.get(f_name, "")
                 
-                ent = ctk.CTkEntry(scroll, width=400)
-                ent.insert(0, str(existing.get(f_name, "")) if existing.get(f_name) is not None else "")
-                ent.pack(pady=4)
-                extra_entries[f_name] = ent
-                if readonly: ent.configure(state="disabled")
+                if f_type == "multi_line":
+                    ctk.CTkLabel(scroll, text=f_label, font=("Arial", 12, "bold")).pack(anchor="w", pady=(10, 0))
+                    tb = ctk.CTkTextbox(scroll, width=400, height=70)
+                    tb.insert("1.0", str(f_val) if f_val is not None else "")
+                    if readonly: tb.configure(state="disabled")
+                    tb.pack(pady=4)
+                    extra_entries[f_name] = ("multi_line", tb)
 
+                elif f_type == "date":
+                    get_c_date, set_c_date = self._date_picker(scroll, f_label, str(f_val or ""), readonly)
+                    extra_entries[f_name] = ("date", get_c_date)
+
+                else: # single_line
+                    ctk.CTkLabel(scroll, text=f_label, font=("Arial", 12, "bold")).pack(anchor="w", pady=(10, 0))
+                    ent = ctk.CTkEntry(scroll, width=400)
+                    ent.insert(0, str(f_val) if f_val is not None else "")
+                    if readonly: ent.configure(state="disabled")
+                    ent.pack(pady=4)
+                    extra_entries[f_name] = ("single_line", ent)
+
+        # Populate Fixed Footer Frame Buttons
         if not readonly:
             def save():
                 data = {
@@ -5543,17 +5721,23 @@ class AutoAttendanceApp(ctk.CTk):
                     "dob":           get_dob(),
                     "baptism_date":  get_bap(),
                     "area":          area_e.get().strip(),
-                    "address":       s_entries["address"].get(),
-                    "email":         s_entries["email"].get(),
-                    "phone":         s_entries["phone"].get(),
-                    "has_holy_spirit": hs_var.get(),
+                    "address":       s_entries.get("address", ctk.CTkEntry(dialog)).get() if "address" in s_entries else "",
+                    "email":         s_entries.get("email", ctk.CTkEntry(dialog)).get() if "email" in s_entries else "",
+                    "phone":         s_entries.get("phone", ctk.CTkEntry(dialog)).get() if "phone" in s_entries else "",
+                    "has_holy_spirit": hs_var.get() if 'hs_var' in locals() else False,
                     "image_path":    self.dialog_img_path,
-                    "remark":        remark_e.get("1.0", "end").strip(),
+                    "remark":        remark_e.get("1.0", "end").strip() if 'remark_e' in locals() else "",
                     "age_category":  age_cat_var.get(),
                 }
-                # Collect extra fields
-                for f_name, ent in extra_entries.items():
-                    data[f_name] = ent.get().strip()
+                # Collect extra fields based on type
+                for f_name, (f_kind, widget_or_getter) in extra_entries.items():
+                    if f_kind == "multi_line":
+                        data[f_name] = widget_or_getter.get("1.0", "end").strip()
+                    elif f_kind == "date":
+                        data[f_name] = widget_or_getter()
+                    else:
+                        data[f_name] = widget_or_getter.get().strip()
+
                 if not data["name"]:
                     messagebox.showwarning("Missing", "Name is required.", parent=dialog)
                     return
@@ -5567,10 +5751,8 @@ class AutoAttendanceApp(ctk.CTk):
                         if not messagebox.askyesno("Duplicate Name", f"A member with the name '{data['name']}' already exists (ID: {exists_name[0]}).\n\nDo you want to proceed and create another record with the same name?", parent=dialog):
                             return
                             
-                # Use prefix if brand new member
                 prefix = self.settings.get("member_prefix", "") if not code else ""
                 try:
-                    # Collect title directly from widget to be sure
                     data["title"] = title_cb.get()
                     self.backend.register_member(data, force_code=code, prefix=prefix)
                 except Exception as e:
@@ -5580,10 +5762,12 @@ class AutoAttendanceApp(ctk.CTk):
                 self.refresh_member_table()
                 dialog.destroy()
 
-            ctk.CTkButton(scroll, text="💾  Save", fg_color="#28A745",
-                          width=200, height=42, command=save).pack(pady=22)
+            save_btn = ctk.CTkButton(footer_frame, text="💾  Save", fg_color="#28A745", hover_color="#218838",
+                                     font=("Arial", 14, "bold"), width=220, height=44, command=save)
+            save_btn.pack(pady=10)
         else:
-            ctk.CTkButton(scroll, text="Close", width=140, command=dialog.destroy).pack(pady=22)
+            close_btn = ctk.CTkButton(footer_frame, text="Close", width=140, height=38, command=dialog.destroy)
+            close_btn.pack(pady=10)
 
     # ── Master Data Page ────────────────────────────────────────────────────────
     def init_master_data_page(self):
