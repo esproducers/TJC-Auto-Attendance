@@ -555,58 +555,87 @@ class InsightFaceAttendance:
         temp_dir = "temp_import"
         if os.path.exists(temp_dir): shutil.rmtree(temp_dir)
         
-        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-            zip_ref.extractall(temp_dir)
+        try:
+            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                zip_ref.extractall(temp_dir)
+                
+            json_p = os.path.join(temp_dir, "members.json")
+            if not os.path.exists(json_p):
+                shutil.rmtree(temp_dir)
+                return False, "Invalid migration file: members.json missing."
+                
+            with open(json_p, 'r', encoding='utf-8') as f:
+                members_data = json.load(f)
+                
+            conn = sqlite3.connect(self.db_path)
+            c = conn.cursor()
             
-        json_p = os.path.join(temp_dir, "members.json")
-        if not os.path.exists(json_p):
+            c.execute("PRAGMA table_info(members)")
+            db_cols = [row[1] for row in c.fetchall()]
+            
+            added, updated = 0, 0
+            for m in members_data:
+                code = m.get('member_code')
+                if not code:
+                    continue
+                    
+                exists = c.execute("SELECT 1 FROM members WHERE member_code=?", (code,)).fetchone()
+                
+                if exists:
+                    # Update ONLY columns present in m (and present in DB)
+                    upd_fields = [col for col in db_cols if col != 'member_code' and col in m]
+                    if upd_fields:
+                        set_clause = ", ".join([f"{col}=?" for col in upd_fields])
+                        vals = [m[col] for col in upd_fields]
+                        vals.append(code)
+                        c.execute(f"UPDATE members SET {set_clause} WHERE member_code=?", vals)
+                        updated += 1
+                else:
+                    # New member: build row with defaults for missing columns
+                    new_row = {}
+                    for col in db_cols:
+                        if col == 'member_code':
+                            new_row[col] = code
+                        elif col == 'registration_date':
+                            new_row[col] = m.get('registration_date', str(date.today()))
+                        elif col == 'name':
+                            new_row[col] = m.get('name', '')
+                        elif col == 'type':
+                            new_row[col] = m.get('type', 'Area Member')
+                        elif col == 'has_holy_spirit':
+                            new_row[col] = 1 if m.get('has_holy_spirit') else 0
+                        elif col == 'age':
+                            new_row[col] = m.get('age', 0)
+                        elif col == 'is_disabled':
+                            new_row[col] = m.get('is_disabled', 0)
+                        elif col in m:
+                            new_row[col] = m[col]
+                        else:
+                            new_row[col] = ''
+                            
+                    cols_str = ", ".join(new_row.keys())
+                    places = ", ".join(["?"] * len(new_row))
+                    c.execute(f"INSERT INTO members ({cols_str}) VALUES ({places})", list(new_row.values()))
+                    added += 1
+            
+            conn.commit()
+            conn.close()
+            
+            # Copy photos
+            img_dir = os.path.join(temp_dir, "photos")
+            if os.path.exists(img_dir):
+                for fn in os.listdir(img_dir):
+                    shutil.copy(os.path.join(img_dir, fn), os.path.join(self.face_dir, fn))
+            
+            # Cleanup
             shutil.rmtree(temp_dir)
-            return False, "Invalid migration file: members.json missing."
+            self.load_known_faces()
             
-        with open(json_p, 'r') as f:
-            members_data = json.load(f)
-            
-        conn = sqlite3.connect(self.db_path)
-        c = conn.cursor()
-        
-        added, updated = 0, 0
-        for m in members_data:
-            code = m['member_code']
-            exists = c.execute("SELECT 1 FROM members WHERE member_code=?", (code,)).fetchone()
-            
-            # Prepare data row
-            vals = (code, m['name'], m['type'], m['age'], m['dob'], m['baptism_date'],
-                    m['address'], m['email'], m['phone'], m['has_holy_spirit'],
-                    m['image_path'], m['registration_date'], m['area'], m.get('remark', ''),
-                    m.get('title', ''))
-            
-            if exists:
-                c.execute("""UPDATE members SET name=?, type=?, age=?, dob=?, baptism_date=?, 
-                           address=?, email=?, phone=?, has_holy_spirit=?, image_path=?, 
-                           registration_date=?, area=?, remark=?, title=? WHERE member_code=?""", 
-                        (vals[1], vals[2], vals[3], vals[4], vals[5], vals[6], vals[7], 
-                         vals[8], vals[9], vals[10], vals[11], vals[12], vals[13], vals[14], code))
-                updated += 1
-            else:
-                c.execute("""INSERT INTO members (member_code, name, type, age, dob, baptism_date, 
-                           address, email, phone, has_holy_spirit, image_path, registration_date, area, remark, title)
-                           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", vals)
-                added += 1
-        
-        conn.commit()
-        conn.close()
-        
-        # Copy photos
-        img_dir = os.path.join(temp_dir, "photos")
-        if os.path.exists(img_dir):
-            for fn in os.listdir(img_dir):
-                shutil.copy(os.path.join(img_dir, fn), os.path.join(self.face_dir, fn))
-        
-        # Cleanup
-        shutil.rmtree(temp_dir)
-        self.load_known_faces()
-        
-        return True, f"Import Finished: {added} added, {updated} updated."
+            return True, f"Import Finished: {added} added, {updated} updated."
+        except Exception as e:
+            if os.path.exists(temp_dir):
+                shutil.rmtree(temp_dir)
+            return False, f"Import error: {str(e)}"
 
     def bulk_import_excel(self, excel_path, prefix="TJC"):
         """Import members from an Excel file, skipping duplicate names."""

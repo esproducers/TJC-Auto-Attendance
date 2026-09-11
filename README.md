@@ -23,7 +23,7 @@ This system utilizes the InsightFace facial recognition engine specifically tail
 
 ### 🔧 Software Requirements & Deployment Execution
 
-#### 1. Install Dependencies
+####  Install Dependencies
 # Installation Guide: Auto-Attendance System
 
 This guide explains how to set up the Auto-Attendance tracker on a **New Windows PC** or a **Mac (macOS)**.
