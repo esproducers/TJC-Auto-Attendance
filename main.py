@@ -573,12 +573,46 @@ class InsightFaceAttendance:
             c.execute("PRAGMA table_info(members)")
             db_cols = [row[1] for row in c.fetchall()]
             
+            # Copy photos FIRST so photo paths exist locally on this machine
+            img_dir = os.path.join(temp_dir, "photos")
+            imported_photo_map = {}
+            if os.path.exists(img_dir):
+                if not os.path.exists(self.face_dir):
+                    os.makedirs(self.face_dir, exist_ok=True)
+                for fn in os.listdir(img_dir):
+                    src_p = os.path.join(img_dir, fn)
+                    dst_p = os.path.join(self.face_dir, fn)
+                    shutil.copy2(src_p, dst_p)
+                    # Extract member_code from filename (e.g. SK-0177_Name.jpg -> SK-0177)
+                    stem = os.path.splitext(fn)[0]
+                    p_code = stem.split('_', 1)[0] if '_' in stem else stem
+                    if p_code:
+                        imported_photo_map[p_code] = dst_p
+
             added, updated = 0, 0
             for m in members_data:
                 code = m.get('member_code')
                 if not code:
                     continue
-                    
+                
+                # Check if we copied a local photo for this member or if one exists in self.face_dir
+                local_photo = imported_photo_map.get(code)
+                if not local_photo and os.path.exists(self.face_dir):
+                    for fn in os.listdir(self.face_dir):
+                        if fn.startswith(f"{code}_") or fn.startswith(f"{code}."):
+                            local_photo = os.path.join(self.face_dir, fn)
+                            break
+                            
+                # If a local photo exists for this member, override m['image_path'] to point to local photo!
+                if local_photo:
+                    m['image_path'] = local_photo
+                elif 'image_path' in m and m['image_path'] and not os.path.exists(m['image_path']):
+                    # Foreign path from another PC that does not exist here; check if basename exists in face_dir
+                    bn = os.path.basename(m['image_path'])
+                    cand = os.path.join(self.face_dir, bn)
+                    if os.path.exists(cand):
+                        m['image_path'] = cand
+
                 exists = c.execute("SELECT 1 FROM members WHERE member_code=?", (code,)).fetchone()
                 
                 if exists:
@@ -617,15 +651,13 @@ class InsightFaceAttendance:
                     places = ", ".join(["?"] * len(new_row))
                     c.execute(f"INSERT INTO members ({cols_str}) VALUES ({places})", list(new_row.values()))
                     added += 1
-            
+
+            # Extra pass: update image_path in DB for all imported photos
+            for p_code, dst_p in imported_photo_map.items():
+                c.execute("UPDATE members SET image_path=? WHERE member_code=?", (dst_p, p_code))
+
             conn.commit()
             conn.close()
-            
-            # Copy photos
-            img_dir = os.path.join(temp_dir, "photos")
-            if os.path.exists(img_dir):
-                for fn in os.listdir(img_dir):
-                    shutil.copy(os.path.join(img_dir, fn), os.path.join(self.face_dir, fn))
             
             # Cleanup
             shutil.rmtree(temp_dir)

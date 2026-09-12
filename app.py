@@ -114,6 +114,23 @@ try:
 except Exception:
     pass
 
+def resolve_member_photo_path(code, img_p=None, face_dir="registered_faces"):
+    if img_p and os.path.exists(img_p):
+        return img_p
+    if img_p:
+        bn = os.path.basename(img_p)
+        cand = os.path.join(face_dir, bn)
+        if os.path.exists(cand):
+            return cand
+    if code and os.path.exists(face_dir):
+        for fn in os.listdir(face_dir):
+            if fn.startswith(f"{code}_") or fn.startswith(f"{code}."):
+                cand = os.path.join(face_dir, fn)
+                if os.path.exists(cand):
+                    return cand
+    return None
+
+
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -1796,9 +1813,10 @@ class AutoAttendanceApp(ctk.CTk):
             # Photo
             img_lbl = ctk.CTkLabel(row, text="👤", width=60, height=60, fg_color="#E5E7EB" if is_dis else "#F3F4F6", corner_radius=30)
             img_lbl.grid(row=0, column=1, padx=10, pady=10)
-            if img_p and os.path.exists(img_p):
+            real_img_p = resolve_member_photo_path(code, img_p)
+            if real_img_p and os.path.exists(real_img_p):
                 try:
-                    pil = Image.open(img_p).resize((60, 60))
+                    pil = Image.open(real_img_p).resize((60, 60))
                     ci = ctk.CTkImage(light_image=pil, size=(60, 60))
                     img_lbl.configure(image=ci, text="")
                 except: pass
@@ -2349,9 +2367,10 @@ class AutoAttendanceApp(ctk.CTk):
                 # Profile Image
                 img_lbl = ctk.CTkLabel(row, text="📷", width=65, height=65, fg_color="#F3F4F6", corner_radius=6)
                 img_lbl.pack(side="left", padx=10, pady=7)
-                if img_p and os.path.exists(img_p):
+                real_img_p = resolve_member_photo_path(m_code, img_p)
+                if real_img_p and os.path.exists(real_img_p):
                     try:
-                        pil = Image.open(img_p).resize((65, 65))
+                        pil = Image.open(real_img_p).resize((65, 65))
                         ci = ctk.CTkImage(light_image=pil, size=(65, 65))
                         img_lbl.configure(image=ci, text="")
                     except: pass
@@ -5538,7 +5557,9 @@ class AutoAttendanceApp(ctk.CTk):
         extra_fields = [c for c in db_cols if c not in standard_fields]
 
         # ── 1. FIXED TOP PHOTO CONTAINER ──────────────────────────────────────
-        self.dialog_img_path = existing.get("image_path", "")
+        code_val = existing.get("member_code", "")
+        raw_img_p = existing.get("image_path", "")
+        self.dialog_img_path = resolve_member_photo_path(code_val, raw_img_p) or ""
 
         photo_frame = ctk.CTkFrame(dialog, fg_color="#F8F9FA", corner_radius=8)
         photo_frame.pack(side="top", fill="x", padx=15, pady=(15, 5))
