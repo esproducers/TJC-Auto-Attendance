@@ -40,14 +40,13 @@ This guide explains how to set up the Auto-Attendance tracker on a **New Windows
 When installing Python from the official website, make sure to check the box: **"Add Python to PATH"**.
 
 ### Step 2: Download the Code
-bash
+```bash
 git clone https://github.com/esproducers/TJC-Auto-Attendance.git
+```
 🔑 Notes
 This requires Git installed on your system.
 
 On Windows: install from git-scm.com.
-
-On macOS/Linux: Git is usually preinstalled, or you can install via package manager (brew install git or sudo apt install git).
 
 The command will create a local folder named TJC-Auto-Attendance in your current directory. 
 Notes: You can pull the latest updates anytime in settings. 
@@ -59,7 +58,13 @@ Open the folder, and Double-click "install" to auto install:
 install.bat
 ```
 
-### Step 4: Run the App
+### Step 4: Run the Setup App 
+Then, need to download model, just run:
+```bash
+run_setup.bat
+```
+
+### Step 5: Run the App
 *Wait for it to finish.* Then, whenever you want to start the app, just run:
 ```bash
 run.bat
@@ -84,8 +89,6 @@ git clone https://github.com/esproducers/TJC-Auto-Attendance.git
 ```
 🔑 Notes
 This requires Git installed on your system.
-
-On Windows: install from git-scm.com.
 
 On macOS/Linux: Git is usually preinstalled, or you can install via package manager (brew install git or sudo apt install git).
 

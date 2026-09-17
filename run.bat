@@ -7,5 +7,5 @@ if not exist "venv" (
 )
 echo Starting Auto-Attendance System...
 call venv\Scripts\activate
-pythonw app.py
-pause
+start "" pythonw.exe app.py
+exit

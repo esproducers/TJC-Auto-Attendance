@@ -610,6 +610,7 @@ class AutoAttendanceApp(ctk.CTk):
             except: pass
 
     def on_closing(self):
+        self.camera_running = False
         self.is_marking = False
         if hasattr(self, 'backend') and self.backend and self.backend.camera:
             self.backend.camera.release()
@@ -2483,15 +2484,29 @@ class AutoAttendanceApp(ctk.CTk):
         ctk.CTkButton(dialog, text="Proceed to Sync Out", height=40, font=("Arial", 13, "bold"), command=do_export).pack(pady=20, padx=40, fill="x")
 
     def on_bulk_sync_input(self):
-        """Import members from a zip file."""
-        from tkinter import filedialog
+        """Import members from a zip file with background threading to avoid UI freeze."""
+        from tkinter import filedialog, messagebox
         path = filedialog.askopenfilename(
             filetypes=[("Zip files", "*.zip")],
             title="Import Sync File"
         )
         if not path: return
-        
-        ok, msg = self.backend.bulk_import_archive(path)
+
+        if hasattr(self, 'sync_in_btn') and self.sync_in_btn:
+            self.sync_in_btn.configure(state="disabled", text="Importing...")
+
+        def bg_import_task():
+            try:
+                ok, msg = self.backend.bulk_import_archive(path)
+                self.after(0, lambda: self._on_bulk_sync_input_finished(ok, msg))
+            except Exception as e:
+                self.after(0, lambda: self._on_bulk_sync_input_finished(False, f"Import Error: {e}"))
+
+        threading.Thread(target=bg_import_task, daemon=True).start()
+
+    def _on_bulk_sync_input_finished(self, ok, msg):
+        if hasattr(self, 'sync_in_btn') and self.sync_in_btn:
+            self.sync_in_btn.configure(state="normal", text="⬆ Sync In")
         if ok:
             messagebox.showinfo("Import Success", msg)
             self.refresh_member_table()
@@ -2499,7 +2514,7 @@ class AutoAttendanceApp(ctk.CTk):
             messagebox.showerror("Import Failed", msg)
 
     def on_bulk_excel_import(self):
-        from tkinter import filedialog
+        from tkinter import filedialog, messagebox
         path = filedialog.askopenfilename(
             filetypes=[("Excel files", "*.xlsx *.xls")],
             title="Import Excel File"
@@ -2507,7 +2522,17 @@ class AutoAttendanceApp(ctk.CTk):
         if not path: return
         
         prefix = self.settings.get("member_prefix", "TJC")
-        ok, msg = self.backend.bulk_import_excel(path, prefix=prefix)
+
+        def bg_excel_task():
+            try:
+                ok, msg = self.backend.bulk_import_excel(path, prefix=prefix)
+                self.after(0, lambda: self._on_bulk_excel_finished(ok, msg))
+            except Exception as e:
+                self.after(0, lambda: self._on_bulk_excel_finished(False, f"Excel Import Error: {e}"))
+
+        threading.Thread(target=bg_excel_task, daemon=True).start()
+
+    def _on_bulk_excel_finished(self, ok, msg):
         if ok:
             messagebox.showinfo("Excel Import", msg)
             self.refresh_member_table()
@@ -4872,7 +4897,30 @@ class AutoAttendanceApp(ctk.CTk):
         card._search_data = f"{name} {code} {title}".lower()
         return card
 
-    # ── Camera Loop ───────────────────────────────────────────────────────────
+    # ── Camera Loop & Multi-threaded Video Stream Capture ────────────────────
+
+    def start_camera_thread(self):
+        if getattr(self, 'camera_running', False):
+            return
+        self.camera_running = True
+        self.latest_raw_frame = None
+        self.camera_thread = threading.Thread(target=self._video_capture_loop, daemon=True)
+        self.camera_thread.start()
+
+    def _video_capture_loop(self):
+        """Dedicated background thread for reading camera frames continuously to avoid GUI freeze and H.264 packet drops."""
+        while getattr(self, 'camera_running', False):
+            try:
+                if hasattr(self, 'backend') and self.backend.camera and self.backend.camera.isOpened():
+                    ret, frame = self.backend.camera.read()
+                    if ret and frame is not None:
+                        self.latest_raw_frame = frame
+                    else:
+                        time.sleep(0.01)
+                else:
+                    time.sleep(0.05)
+            except Exception:
+                time.sleep(0.05)
 
     def update_camera(self):
         # Countdown / auto-stop
@@ -4892,8 +4940,12 @@ class AutoAttendanceApp(ctk.CTk):
             elif self.is_marking:
                 self.finalize_session(manual=False)
 
-        ret, frame = self.backend.camera.read()
-        if ret:
+        if not getattr(self, 'camera_running', False):
+            self.start_camera_thread()
+
+        raw_frame = getattr(self, 'latest_raw_frame', None)
+        if raw_frame is not None:
+            frame = raw_frame.copy()
             if getattr(self.backend, 'bright_light_mode', False):
                 frame = self.backend.apply_smart_bright_light_compensation(frame)
             self.last_frame = frame.copy()
@@ -4931,16 +4983,15 @@ class AutoAttendanceApp(ctk.CTk):
 
                             ts = datetime.now().strftime("%H:%M")
                             if res['name'] != "Unknown":
-                                m_title = res.get('title', '')
-                                self.activity_log.insert("end", f"[{ts}] ✅ {m_title} {res['name']} ({res['type']})\n")
                                 if res.get('new'):
+                                    m_title = res.get('title', '')
+                                    self.activity_log.insert("end", f"[{ts}] ✅ {m_title} {res['name']} ({res['type']})\n")
                                     self.add_attendee_card(res['name'], res['img'], res['type'], res['code'], title=m_title)
+                                    self.activity_log.see("end")
                             else:
-                                self.activity_log.insert("end", f"[{ts}] ❓ Unknown face captured\n")
                                 if res.get('new'):
-                                    # unknown logic - stays in waiting list
-                                    pass
-                            self.activity_log.see("end")
+                                    self.activity_log.insert("end", f"[{ts}] ❓ Unknown face captured\n")
+                                    self.activity_log.see("end")
                 except queue.Empty:
                     pass
 
