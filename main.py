@@ -1299,13 +1299,27 @@ class InsightFaceAttendance:
                             p['best_frame'] = frame.copy()
                             p['bbox'] = bbox
 
-                        # Require 3 consecutive hits (~0.1 sec) to confirm a clear, sharp snapshot
-                        if p['hit_count'] >= 3:
-                            img = self.save_unknown(p['best_frame'], bbox=p['bbox'])
+                        # Require 2 consecutive hits to confirm — fast enough to feel instant,
+                        # while still filtering single-frame ghost detections
+                        if p['hit_count'] >= 2:
+                            # Lock the encoding immediately so this stranger is never captured again
                             self.session_unknown_encodings.append(p['enc'])
-                            results.append({'name': 'Unknown', 'code': '', 'bbox': p['bbox'],
-                                            'new': True, 'img': img, 'type': 'unknown'})
+                            captured_frame = p['best_frame']
+                            captured_bbox  = list(p['bbox'])
                             del self.pending_unknowns[target_uid]
+
+                            # Offload disk I/O + DB write to background thread so inference loop is never blocked
+                            def _bg_save(f=captured_frame, b=captured_bbox):
+                                saved_path = self.save_unknown(f, bbox=b)
+                                return saved_path
+
+                            import concurrent.futures
+                            if not hasattr(self, '_unk_executor'):
+                                self._unk_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix='unk_save')
+                            future = self._unk_executor.submit(_bg_save)
+
+                            results.append({'name': 'Unknown', 'code': '', 'bbox': captured_bbox,
+                                            'new': True, 'img': None, '_save_future': future, 'type': 'unknown'})
                     else:
                         # Initial unknown detection: place in sliding buffer with hit_count = 1
                         uid = str(uuid.uuid4())

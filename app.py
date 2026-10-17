@@ -4621,7 +4621,7 @@ class AutoAttendanceApp(ctk.CTk):
             # Exclude those already present in this session
             # IS NOT NULL prevents NULL member_code from ruining SQL NOT IN
             members = conn.execute("""
-                SELECT member_code, name, type, title FROM members 
+                SELECT member_code, name, type, title, image_path FROM members 
                 WHERE member_code NOT IN (
                     SELECT member_code FROM attendance 
                     WHERE session_id=? AND member_code IS NOT NULL
@@ -4640,8 +4640,8 @@ class AutoAttendanceApp(ctk.CTk):
 
             info_lbl.configure(text=f"Showing top {len(members)} match(es)")
 
-            for code, name, mtype, title in members:
-                item_f = ctk.CTkFrame(list_f, fg_color="#FFFFFF", height=44, corner_radius=6, border_width=1, border_color="#E5E7EB")
+            for code, name, mtype, title, img_path in members:
+                item_f = ctk.CTkFrame(list_f, fg_color="#FFFFFF", height=50, corner_radius=6, border_width=1, border_color="#E5E7EB")
                 item_f.pack(fill="x", pady=2)
                 item_f.pack_propagate(False)
 
@@ -4649,10 +4649,21 @@ class AutoAttendanceApp(ctk.CTk):
                 item_checkboxes[code] = (cb_var, name, mtype)
 
                 cb = ctk.CTkCheckBox(item_f, text="", variable=cb_var, width=20, command=update_batch_btn_text)
-                cb.pack(side="left", padx=(10, 5))
+                cb.pack(side="left", padx=(10, 4))
+
+                # Profile photo thumbnail
+                photo_lbl = ctk.CTkLabel(item_f, text="👤", font=("Arial", 18), width=36)
+                photo_lbl.pack(side="left", padx=(0, 6))
+                if img_path and os.path.exists(img_path):
+                    try:
+                        pil = Image.open(img_path).resize((36, 36))
+                        ci = ctk.CTkImage(light_image=pil, size=(36, 36))
+                        photo_lbl.configure(image=ci, text="")
+                    except Exception:
+                        pass
 
                 disp_title = f"{title} " if title else ""
-                lbl_text = f"👤  {disp_title}{name} ({code})"
+                lbl_text = f"{disp_title}{name} ({code})"
                 ctk.CTkLabel(item_f, text=lbl_text, font=("Arial", 11, "bold"), text_color="#1F2937", anchor="w").pack(side="left", padx=5)
 
                 add_btn = ctk.CTkButton(item_f, text="➕ Add", width=65, height=28, font=("Arial", 10, "bold"),
@@ -4756,7 +4767,7 @@ class AutoAttendanceApp(ctk.CTk):
             # Fetch members present in active session
             present_members = conn.execute("""
                 SELECT a.member_code, COALESCE(m.name, a.person_name, 'Unknown') AS name,
-                       COALESCE(m.type, a.status, 'Member') AS mtype, m.title
+                       COALESCE(m.type, a.status, 'Member') AS mtype, m.title, m.image_path
                 FROM attendance a
                 LEFT JOIN members m ON a.member_code = m.member_code
                 WHERE a.session_id = ? AND (a.member_code IS NOT NULL OR (a.status IS NOT NULL AND a.status != 'unknown'))
@@ -4772,14 +4783,25 @@ class AutoAttendanceApp(ctk.CTk):
 
             info_lbl.configure(text=f"Total {len(present_members)} attendee(s) present in current session")
 
-            for code, name, mtype, title in present_members:
-                item_f = ctk.CTkFrame(list_f, fg_color="#FFFFFF", height=44, corner_radius=6, border_width=1, border_color="#E5E7EB")
+            for code, name, mtype, title, img_path in present_members:
+                item_f = ctk.CTkFrame(list_f, fg_color="#FFFFFF", height=50, corner_radius=6, border_width=1, border_color="#E5E7EB")
                 item_f.pack(fill="x", pady=2)
                 item_f.pack_propagate(False)
 
+                # Profile photo thumbnail
+                photo_lbl = ctk.CTkLabel(item_f, text="👤", font=("Arial", 18), width=36)
+                photo_lbl.pack(side="left", padx=(10, 6))
+                if img_path and os.path.exists(img_path):
+                    try:
+                        pil = Image.open(img_path).resize((36, 36))
+                        ci = ctk.CTkImage(light_image=pil, size=(36, 36))
+                        photo_lbl.configure(image=ci, text="")
+                    except Exception:
+                        pass
+
                 disp_title = f"{title} " if title else ""
-                lbl_text = f"👤  {disp_title}{name} ({code})"
-                ctk.CTkLabel(item_f, text=lbl_text, font=("Arial", 11, "bold"), text_color="#1F2937", anchor="w").pack(side="left", padx=10)
+                lbl_text = f"{disp_title}{name} ({code})"
+                ctk.CTkLabel(item_f, text=lbl_text, font=("Arial", 11, "bold"), text_color="#1F2937", anchor="w").pack(side="left", padx=5)
 
                 rem_btn = ctk.CTkButton(item_f, text="🗑️ Remove", width=80, height=28, font=("Arial", 10, "bold"),
                                         fg_color="#DC2626", hover_color="#B91C1C", text_color="white",
