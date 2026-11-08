@@ -562,42 +562,78 @@ class AutoAttendanceApp(ctk.CTk):
                 pass
 
     def initialize_face_engine(self):
-        """Attempts to load AI models, asking for temporary internet access if they are missing."""
-        try:
-            # First attempt: With firewall active
-            self.backend.prepare()
-            print("[INFO] AI Engine initialized successfully (Offline).")
-            self.after(300, self.hide_console_window)
-        except Exception as e:
-            print(f"[WARN] AI Engine failed to initialize: {e}")
-            # If it failed, it might be due to missing models needing download
-            if messagebox.askyesno("AI Models Missing", 
-                                   "The required Face Recognition models are missing from your system.\n\n"
-                                   "Would you like to TEMPORARILY enable internet access to download them? (approx. 300MB)\n\n"
-                                   "Data privacy firewall will be paused only during the download."):
-                global FIREWALL_BYPASS
-                FIREWALL_BYPASS = True
-                
-                # Show a progress notice
-                notice = ctk.CTkToplevel(self)
-                notice.title("Downloading Models...")
-                notice.geometry("300x150")
-                notice.attributes("-topmost", True)
-                ctk.CTkLabel(notice, text="Downloading AI Models...\nPlease wait, this may take a few minutes.", pady=20).pack()
-                self.update()
-                
-                try:
-                    self.backend.prepare()
-                    messagebox.showinfo("Success", "Models downloaded and initialized successfully!\nFirewall is now RE-LOCKED.")
-                except Exception as e2:
-                    messagebox.showerror("Download Error", f"Failed to download models: {e2}")
-                finally:
+        """Load InsightFace and face cache in a worker so the GUI remains responsive."""
+        if getattr(self, "_face_init_started", False):
+            return
+        self._face_init_started = True
+        self._face_init_status = "loading"
+        self._start_face_init_worker(allow_download=False)
+
+    def _start_face_init_worker(self, allow_download=False):
+        def worker():
+            global FIREWALL_BYPASS
+            try:
+                if allow_download:
+                    FIREWALL_BYPASS = True
+                self.backend.prepare()
+                self.gui_queue.put(lambda: self._face_init_finished(True, None))
+            except Exception as exc:
+                self.gui_queue.put(lambda err=str(exc): self._face_init_finished(False, err))
+            finally:
+                if allow_download:
                     FIREWALL_BYPASS = False
-                    notice.destroy()
-            else:
-                messagebox.showwarning("Initialization Incomplete", 
-                                       "Face recognition will not work without models. "
-                                       "You can manually place the models in the './models' folder to stay 100% offline.")
+        threading.Thread(target=worker, name="FaceEngineInit", daemon=True).start()
+
+    def _face_init_finished(self, success, error):
+        if success:
+            self._face_init_status = "ready"
+            print("[INFO] AI Engine initialized successfully (background).")
+            self.after(300, self.hide_console_window)
+            return
+        self._face_init_status = "error"
+        print(f"[WARN] AI Engine initialization failed: {error}")
+        if messagebox.askyesno("AI Models Missing / Initialization Error",
+            "Face recognition could not initialize.\n\n"
+            f"Details: {error}\n\n"
+            "Would you like to temporarily enable internet access to download missing models? (approx. 300MB)\n\n"
+            "The privacy firewall will be re-enabled after the attempt.", parent=self):
+            notice = ctk.CTkToplevel(self)
+            notice.title("Loading AI Models...")
+            notice.geometry("340x150")
+            notice.attributes("-topmost", True)
+            ctk.CTkLabel(notice, text="Loading / downloading AI models...\nPlease wait. The rest of the interface remains available.", pady=20).pack()
+            self._face_init_notice = notice
+            self._face_init_status = "loading"
+            self._start_face_init_download_worker()
+        else:
+            messagebox.showwarning("Face Recognition Unavailable",
+                "Other program functions remain available, but face recognition requires valid local models.", parent=self)
+
+    def _start_face_init_download_worker(self):
+        def worker():
+            global FIREWALL_BYPASS
+            FIREWALL_BYPASS = True
+            try:
+                self.backend.prepare()
+                self.gui_queue.put(lambda: self._face_init_download_finished(True, None))
+            except Exception as exc:
+                self.gui_queue.put(lambda err=str(exc): self._face_init_download_finished(False, err))
+            finally:
+                FIREWALL_BYPASS = False
+        threading.Thread(target=worker, name="FaceModelDownload", daemon=True).start()
+
+    def _face_init_download_finished(self, success, error):
+        notice = getattr(self, "_face_init_notice", None)
+        if notice is not None:
+            try: notice.destroy()
+            except Exception: pass
+            self._face_init_notice = None
+        self._face_init_status = "ready" if success else "error"
+        if success:
+            messagebox.showinfo("Success", "Face recognition initialized successfully. Privacy firewall is re-enabled.", parent=self)
+            self.after(300, self.hide_console_window)
+        else:
+            messagebox.showerror("Initialization Error", f"Face recognition could not initialize:\n{error}", parent=self)
 
     def _update_readme_admin(self):
         if os.path.exists("README.md"):
@@ -1883,64 +1919,89 @@ class AutoAttendanceApp(ctk.CTk):
         top.pack(fill="x", pady=(0, 8))
         ctk.CTkLabel(top, text="Attendance History", font=("Arial", 17, "bold")).pack(side="left")
         ctk.CTkButton(top, text="🔄 Refresh", width=100,
-                      command=self.refresh_logs_table).pack(side="right")
+                      command=lambda: self.refresh_logs_table(reset=True)).pack(side="right")
+
+        search_row = ctk.CTkFrame(f, fg_color="transparent")
+        search_row.pack(fill="x", pady=(0, 8))
+        self.logs_search_entry = ctk.CTkEntry(search_row, placeholder_text="Search session title or date...", height=34)
+        self.logs_search_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        ctk.CTkButton(search_row, text="🔍 Search", width=100,
+                      command=lambda: self.refresh_logs_table(reset=True)).pack(side="left")
+        self.logs_search_entry.bind("<Return>", lambda _e: self.refresh_logs_table(reset=True))
 
         self.logs_scroll = ctk.CTkScrollableFrame(f, fg_color="#FFFFFF", corner_radius=10)
         self.logs_scroll.pack(fill="both", expand=True, padx=4, pady=4)
-        self.refresh_logs_table()
+        self.logs_footer = ctk.CTkFrame(f, fg_color="transparent")
+        self.logs_footer.pack(fill="x", pady=(5, 0))
+        self.logs_older_btn = ctk.CTkButton(self.logs_footer, text="Load Older Sessions", width=180,
+            command=self.load_older_logs, fg_color="#475569", hover_color="#334155")
+        self.logs_older_btn.pack(side="right")
+        self.logs_offset = 0
+        self.logs_page_size = 10
+        self.refresh_logs_table(reset=True)
 
-    def refresh_logs_table(self):
-        # Redesigned to show by Task/Session for easier identification
+    def load_older_logs(self):
+        self.logs_offset = getattr(self, "logs_offset", 0) + getattr(self, "logs_page_size", 10)
+        self.refresh_logs_table(reset=False)
+
+    def refresh_logs_table(self, reset=False):
+        """Load only 10 sessions at a time; old history remains in SQLite."""
+        if reset:
+            self.logs_offset = 0
         for w in self.logs_scroll.winfo_children():
             w.destroy()
-        
-        conn = sqlite3.connect("database/attendance.db")
-        # Fetching sessions and checking for counts of 'unknown' status
-        sessions = conn.execute("""
-            SELECT s.id, s.title, s.date, s.start_time,
-                   SUM(CASE WHEN a.status = 'unknown' THEN 1 ELSE 0 END) AS unk_count
-            FROM sessions s
-            JOIN attendance a ON a.session_id = s.id
-            GROUP BY s.id
-            ORDER BY s.date DESC, s.start_time DESC
-        """).fetchall()
-        conn.close()
 
-        if not sessions:
-            ctk.CTkLabel(self.logs_scroll, text="No attendance logs found yet.",
+        search_text = self.logs_search_entry.get().strip() if hasattr(self, "logs_search_entry") else ""
+        conn = sqlite3.connect("database/attendance.db", timeout=10)
+        conn.execute("PRAGMA busy_timeout=10000")
+        try:
+            sessions = conn.execute("""
+                SELECT s.id, s.title, s.date, s.start_time,
+                       SUM(CASE WHEN a.status = 'unknown' THEN 1 ELSE 0 END) AS unk_count
+                FROM sessions s
+                JOIN attendance a ON a.session_id = s.id
+                WHERE (? = '' OR LOWER(COALESCE(s.title,'')) LIKE ? OR CAST(s.date AS TEXT) LIKE ?)
+                GROUP BY s.id
+                ORDER BY s.date DESC, s.start_time DESC
+                LIMIT ? OFFSET ?
+            """, (search_text.lower(), f"%{search_text.lower()}%", f"%{search_text}%",
+                  self.logs_page_size, self.logs_offset)).fetchall()
+        finally:
+            conn.close()
+
+        if not sessions and self.logs_offset == 0:
+            ctk.CTkLabel(self.logs_scroll, text="No attendance logs found for this search.",
                          font=("Arial", 13), text_color="gray").pack(pady=40)
-            return
+        elif not sessions:
+            ctk.CTkLabel(self.logs_scroll, text="No more older sessions.",
+                         font=("Arial", 12), text_color="gray").pack(pady=20)
 
-        def add_session_gradually(index=0):
-            if index >= len(sessions): return
-            sid, title, dt, st, unk_count = sessions[index]
-            
-            row = ctk.CTkFrame(self.logs_scroll, fg_color="#FFFFFF", height=60, corner_radius=8, border_width=1, border_color="#E5E7EB")
+        for sid, title, dt, st, unk_count in sessions:
+            row = ctk.CTkFrame(self.logs_scroll, fg_color="#FFFFFF", height=60, corner_radius=8,
+                               border_width=1, border_color="#E5E7EB")
             row.pack(fill="x", pady=4, padx=8)
             row.pack_propagate(False)
-
             info_f = ctk.CTkFrame(row, fg_color="transparent")
             info_f.pack(side="left", padx=15, pady=10)
-            ctk.CTkLabel(info_f, text=f"{dt}   {str(title).upper()}", font=("Arial", 13, "bold"), text_color="#1F2937").pack(anchor="w")
-            ctk.CTkLabel(info_f, text=f"Started at {str(st)[11:16]}", font=("Arial", 10), text_color="#6B7280").pack(anchor="w")
-
+            ctk.CTkLabel(info_f, text=f"{dt}   {str(title).upper()}", font=("Arial", 13, "bold"),
+                         text_color="#1F2937").pack(anchor="w")
+            ctk.CTkLabel(info_f, text=f"Started at {str(st)[11:16]}", font=("Arial", 10),
+                         text_color="#6B7280").pack(anchor="w")
             btn_f = ctk.CTkFrame(row, fg_color="transparent")
             btn_f.pack(side="right", padx=15)
-
-            # Red color if unknown attendees exist
             b_color = "#DC3545" if (unk_count and unk_count > 0) else "#007BFF"
             h_color = "#C82333" if (unk_count and unk_count > 0) else "#0056b3"
-
-            ctk.CTkButton(btn_f, text="View Attendees", width=140, height=32, font=("Arial", 11, "bold"), fg_color=b_color, hover_color=h_color,
-                          command=lambda s=sid: self.show_session_details_popup(s)).pack(side="left", padx=5)
-            
+            ctk.CTkButton(btn_f, text="View Attendees", width=140, height=32,
+                font=("Arial", 11, "bold"), fg_color=b_color, hover_color=h_color,
+                command=lambda session_id=sid: self.show_session_details_popup(session_id)).pack(side="left", padx=5)
             if self.is_admin:
-                ctk.CTkButton(btn_f, text="X", width=32, height=32, font=("Arial", 11, "bold"), fg_color="transparent", text_color="#DC3545", border_width=1, border_color="#DC3545", hover_color="#FEE2E2",
-                              command=lambda s=sid: self.delete_session_log(s)).pack(side="left")
+                ctk.CTkButton(btn_f, text="X", width=32, height=32, font=("Arial", 11, "bold"),
+                    fg_color="transparent", text_color="#DC3545", border_width=1,
+                    border_color="#DC3545", hover_color="#FEE2E2",
+                    command=lambda session_id=sid: self.delete_session_log(session_id)).pack(side="left")
 
-            self.after(20, lambda: add_session_gradually(index + 1))
-
-        add_session_gradually()
+        if hasattr(self, "logs_older_btn"):
+            self.logs_older_btn.configure(state=("normal" if len(sessions) == self.logs_page_size else "disabled"))
 
     def delete_session_log(self, session_id):
         if not self.is_admin:
@@ -4681,9 +4742,13 @@ class AutoAttendanceApp(ctk.CTk):
             
             added_count = 0
             for code, n, t in selected:
-                ok = self.do_manual_mark(code, n, t)
+                ok = self.do_manual_mark(code, n, t, refresh=False)
                 if ok: added_count += 1
-            
+
+            # One dashboard refresh for the whole batch instead of N expensive rebuilds.
+            if added_count:
+                self.refresh_stats()
+                self.refresh_captured_attendees_list()
             messagebox.showinfo("Success", f"Successfully added {added_count} member(s) to attendance!", parent=dialog)
             populate_list()
 
@@ -4700,10 +4765,17 @@ class AutoAttendanceApp(ctk.CTk):
                                   fg_color="#F3F4F6", text_color="#374151", hover_color="#E5E7EB", command=dialog.destroy)
         close_btn.pack(side="right")
 
-        s_entry.bind("<KeyRelease>", lambda e: populate_list())
+        search_after_id = {"id": None}
+        def schedule_member_search(_event=None):
+            if search_after_id["id"] is not None:
+                try: dialog.after_cancel(search_after_id["id"])
+                except Exception: pass
+            search_after_id["id"] = dialog.after(250, populate_list)
+
+        s_entry.bind("<KeyRelease>", schedule_member_search)
         populate_list()
 
-    def do_manual_mark(self, code, name, mtype):
+    def do_manual_mark(self, code, name, mtype, refresh=True):
         # Fetch profile image and title
         conn = sqlite3.connect("database/attendance.db")
         row = conn.execute("SELECT image_path, title FROM members WHERE member_code=?", (code,)).fetchone()
@@ -4718,10 +4790,10 @@ class AutoAttendanceApp(ctk.CTk):
             ok, path = self.backend.mark_attendance(name, code, None, mtype)
 
         if ok:
-            self.refresh_stats()
             self.activity_log.insert("1.0", f"[{datetime.now().strftime('%H:%M')}] ✅ {m_title} {name} (MANUAL)\n")
-            # Update Captured list
-            self.refresh_captured_attendees_list()
+            if refresh:
+                self.refresh_stats()
+                self.refresh_captured_attendees_list()
             return True
         return False
 
@@ -4847,7 +4919,8 @@ class AutoAttendanceApp(ctk.CTk):
             FROM attendance a
             LEFT JOIN members m ON a.member_code = m.member_code
             WHERE a.session_id = ? AND (a.member_code IS NOT NULL OR (a.status IS NOT NULL AND a.status != 'unknown'))
-            ORDER BY a.check_in_time DESC
+            ORDER BY a.check_in_time DESC, a.id DESC
+            LIMIT 20
         """, (self.backend.active_session_id,)).fetchall()
         conn.close()
 

@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 import time
 import uuid
+import threading
 from datetime import datetime, date
 import insightface
 from PIL import Image
@@ -57,6 +58,8 @@ class InsightFaceAttendance:
                  flip_mode=0):             # 新增：画面方向修正 0=正常,1=水平镜像,2=垂直翻转,3=180°
         self.face_dir    = face_dir
         self.db_path     = db_path
+        self._face_cache_lock = threading.RLock()
+        self._face_reload_guard = threading.Lock()
         self.cache_file  = cache_file
         self.records_dir = os.path.join("records", "attendance")
         self.unknown_dir = os.path.join("records", "unknown")
@@ -217,7 +220,7 @@ class InsightFaceAttendance:
 
     # ── Face cache ────────────────────────────────────────────────────────────
 
-    def load_known_faces(self, force_rebuild=False):
+    def _load_known_faces_impl(self, force_rebuild=False):
         """Smart incremental face cache loader.
         Only computes embeddings for new/modified files instead of rebuilding all 120+ faces."""
         if not os.path.exists(self.face_dir):
@@ -358,10 +361,56 @@ class InsightFaceAttendance:
         else:
             print(f"[CACHE] Loaded {reused_count} faces from cache (no rebuild required).")
 
+    def load_known_faces(self, force_rebuild=False):
+        """Serialize cache rebuilds so admin updates cannot race model preparation."""
+        with self._face_cache_lock:
+            return self._load_known_faces_impl(force_rebuild=force_rebuild)
+
+    def schedule_face_cache_reload(self):
+        """Refresh face embeddings in the background after member/photo changes."""
+        if not self._face_reload_guard.acquire(blocking=False):
+            self._face_reload_pending = True
+            return
+
+        def worker():
+            try:
+                while True:
+                    self._face_reload_pending = False
+                    self.load_known_faces()
+                    if not self._face_reload_pending:
+                        break
+            except Exception as exc:
+                print(f"[CACHE] Background face-cache refresh failed: {exc}")
+            finally:
+                self._face_reload_guard.release()
+        threading.Thread(target=worker, name="FaceCacheRefresh", daemon=True).start()
+
     # ── Database ──────────────────────────────────────────────────────────────
 
     def init_database(self):
-        conn = sqlite3.connect(self.db_path)
+        # Create one consistent SQLite backup per day before schema changes.
+        # sqlite3.Connection.backup includes committed WAL contents, unlike shutil.copy.
+        if os.path.exists(self.db_path) and os.path.getsize(self.db_path) > 0:
+            try:
+                backup_dir = os.path.join(os.path.dirname(self.db_path) or ".", "backups")
+                os.makedirs(backup_dir, exist_ok=True)
+                backup_path = os.path.join(backup_dir, f"attendance_preflight_{date.today().isoformat()}.db")
+                if not os.path.exists(backup_path):
+                    src = sqlite3.connect(self.db_path, timeout=15)
+                    dst = sqlite3.connect(backup_path)
+                    try:
+                        src.execute("PRAGMA busy_timeout=15000")
+                        src.backup(dst)
+                    finally:
+                        dst.close()
+                        src.close()
+            except Exception as backup_error:
+                print(f"[BACKUP] Preflight backup warning: {backup_error}")
+
+        conn = sqlite3.connect(self.db_path, timeout=15)
+        conn.execute("PRAGMA busy_timeout=15000")
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
         c = conn.cursor()
 
         c.execute('''CREATE TABLE IF NOT EXISTS members (
@@ -425,6 +474,12 @@ class InsightFaceAttendance:
         if 'disable_remark' not in mcols:
             c.execute("ALTER TABLE members ADD COLUMN disable_remark TEXT DEFAULT ''")
         
+        # Indexes keep recent attendance/session lookups fast as history grows.
+        c.execute("CREATE INDEX IF NOT EXISTS idx_attendance_session_time ON attendance(session_id, check_in_time DESC)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_attendance_service_date ON attendance(service_date DESC)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_attendance_member_code ON attendance(member_code)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_sessions_date_start ON sessions(date DESC, start_time DESC)")
+
         # Custom Field Metadata Table
         c.execute('''CREATE TABLE IF NOT EXISTS custom_field_metadata (
             field_name TEXT PRIMARY KEY,
@@ -884,7 +939,7 @@ class InsightFaceAttendance:
                             pass
             try:
                 shutil.copy2(img_path, new_path)
-                self.load_known_faces()
+                self.schedule_face_cache_reload()
             except Exception as e:
                 print(f"[WARN] Photo copy error: {e}")
 
@@ -907,8 +962,8 @@ class InsightFaceAttendance:
                     except Exception as e:
                         print(f"[WARN] Failed to delete face photo {fn}: {e}")
 
-        # Update face cache incrementally so recognition updates immediately without hanging
-        self.load_known_faces()
+        # Update face cache asynchronously so the UI and camera remain responsive.
+        self.schedule_face_cache_reload()
         return True
 
     def disable_member(self, code, remark=""):
@@ -919,8 +974,8 @@ class InsightFaceAttendance:
         conn.commit()
         conn.close()
 
-        # Reload faces incrementally so disabled face is removed from recognition memory
-        self.load_known_faces()
+        # Reload faces asynchronously so disabling a member does not freeze the UI.
+        self.schedule_face_cache_reload()
         return True
 
     def enable_member(self, code):
@@ -931,8 +986,8 @@ class InsightFaceAttendance:
         conn.commit()
         conn.close()
 
-        # Reload faces incrementally so face is included back in recognition memory
-        self.load_known_faces()
+        # Reload faces asynchronously so re-enabling a member does not freeze the UI.
+        self.schedule_face_cache_reload()
         return True
 
     # ── Sessions ──────────────────────────────────────────────────────────────
@@ -1099,23 +1154,44 @@ class InsightFaceAttendance:
         if face is None:
             return False
 
-        # 1. Detection score threshold (reduced to 0.50 to capture far-away faces)
-        det_score = getattr(face, 'det_score', 0.0)
-        if det_score < 0.50:
+        # Conservative gate: only well-detected, sufficiently large, near-frontal,
+        # sharp faces may become unrecognised-person records.
+        det_score = float(getattr(face, 'det_score', 0.0) or 0.0)
+        if det_score < 0.72:
             return False
 
-        # 2. Minimum size requirement (reduced to 35px for long-distance doorway detection)
         bbox = face.bbox.astype(int)
-        w = bbox[2] - bbox[0]
-        h = bbox[3] - bbox[1]
-        if w < 35 or h < 35:
+        x1, y1, x2, y2 = map(int, bbox)
+        fw, fh = x2 - x1, y2 - y1
+        if fw < 60 or fh < 60:
             return False
 
-        # 3. Border safety margin (reduced to 5px to prevent missing faces near frame edges)
-        margin = 5
-        if bbox[0] <= margin or bbox[1] <= margin or bbox[2] >= (self.process_width - margin) or bbox[3] >= (frame_h - margin):
+        margin = 8
+        if x1 <= margin or y1 <= margin or x2 >= (frame_w - margin) or y2 >= (frame_h - margin):
             return False
 
+        # InsightFace exposes estimated 3D pose on most model builds. If present,
+        # skip strong side profiles; do not reject when the model omits pose data.
+        pose = getattr(face, 'pose', None)
+        if pose is not None:
+            try:
+                yaw, pitch = abs(float(pose[1])), abs(float(pose[0]))
+                if yaw > 32 or pitch > 28:
+                    return False
+            except Exception:
+                pass
+
+        # Reject motion blur / soft focus using the detected face crop.
+        if frame is not None:
+            try:
+                crop = frame[max(0, y1):min(frame.shape[0], y2), max(0, x1):min(frame.shape[1], x2)]
+                if crop.size == 0:
+                    return False
+                gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY) if len(crop.shape) == 3 else crop
+                if cv2.Laplacian(gray, cv2.CV_64F).var() < 35.0:
+                    return False
+            except Exception:
+                return False
         return True
 
     def _match_face_vectorized(self, current_embedding, threshold=0.45):
@@ -1250,6 +1326,9 @@ class InsightFaceAttendance:
                 # Branch B: Unknown Face Interception (3-Frame Sliding Window & Edge Filter)
                 # =================================================================
                 elif self.active_session_id:
+                    # Strict image-quality gate: blurry, tiny, angled or partial faces are ignored.
+                    if not self.is_quality_unknown_face(face, small.shape[1], small.shape[0], frame=small):
+                        continue
                     # 1. Edge cutoff filter: ignore half-faces touching camera frame borders
                     if bbox[0] <= 10 or bbox[1] <= 10 or bbox[2] >= (w - 10) or bbox[3] >= (h - 10):
                         continue
@@ -1299,9 +1378,8 @@ class InsightFaceAttendance:
                             p['best_frame'] = frame.copy()
                             p['bbox'] = bbox
 
-                        # Require 2 consecutive hits to confirm — fast enough to feel instant,
-                        # while still filtering single-frame ghost detections
-                        if p['hit_count'] >= 2:
+                        # Require 3 quality-approved observations to avoid transient false unknowns.
+                        if p['hit_count'] >= 3:
                             # Lock the encoding immediately so this stranger is never captured again
                             self.session_unknown_encodings.append(p['enc'])
                             captured_frame = p['best_frame']
@@ -1342,50 +1420,49 @@ class InsightFaceAttendance:
     # ── Summary & waiting list ────────────────────────────────────────────────
 
     def get_summary(self, default_area=None):
-        conn = sqlite3.connect(self.db_path)
-        # Denominator: Total 'Area Member' DB count
-        area_total = conn.execute("SELECT COUNT(*) FROM members WHERE type='Area Member' AND (is_disabled = 0 OR is_disabled IS NULL)").fetchone()[0]
-
-        if self.active_session_id:
-            sid = self.active_session_id
-            df  = pd.read_sql("""
-                SELECT a.id,
-                       COALESCE(a.person_name, m.name)         AS name,
-                       COALESCE(m.age_category, '')    AS age,
-                       COALESCE(m.member_code, a.member_code)  AS member_code,
-                       COALESCE(a.status,      m.type)         AS type,
-                       COALESCE(m.area,        '')             AS area,
-                       a.record_image, a.check_in_time,        a.status
-                FROM   attendance a
-                LEFT JOIN members m ON a.member_code = m.member_code
-                WHERE  a.session_id = ?
-                ORDER  BY a.check_in_time DESC
-            """, conn, params=[sid])
-
-            p_area_member = int(df['type'].str.lower().isin(['area member']).sum()) if not df.empty else 0
-            p_other_member = int(df['type'].str.lower().isin(['other area member']).sum()) if not df.empty else 0
-            p_truth = int(df['type'].str.lower().str.contains('truth', na=False).sum()) if not df.empty else 0
-            waiting = int((df['type'].str.lower() == 'unknown').sum()) if not df.empty else 0
-            present = p_area_member + p_other_member + p_truth
-
-            area_rate    = (p_area_member  / area_total    * 100) if area_total    > 0 else 0
-            overall_rate = (present       / area_total    * 100) if area_total    > 0 else 0
-        else:
-            present = p_area_member = p_other_member = p_truth = waiting = 0
-            area_rate = overall_rate = 0.0
-            df = pd.DataFrame()
-
-        conn.close()
-        return {
-            "p_total":        present,
-            "p_area_member":  p_area_member,
-            "p_other_member": p_other_member,
-            "p_truth":        p_truth,
-            "waiting":        waiting,
-            "area_rate":      area_rate,
-            "overall_rate":   overall_rate,
-            "list":           df,
-        }
+        """Return SQL-aggregated counters plus only the 20 newest dashboard rows."""
+        conn = sqlite3.connect(self.db_path, timeout=10)
+        conn.execute("PRAGMA busy_timeout=10000")
+        try:
+            area_total = conn.execute(
+                "SELECT COUNT(*) FROM members WHERE type='Area Member' AND (is_disabled=0 OR is_disabled IS NULL)"
+            ).fetchone()[0]
+            if self.active_session_id:
+                sid = self.active_session_id
+                counts = conn.execute("""
+                    SELECT
+                      SUM(CASE WHEN LOWER(COALESCE(a.status,m.type,''))='area member' THEN 1 ELSE 0 END),
+                      SUM(CASE WHEN LOWER(COALESCE(a.status,m.type,''))='other area member' THEN 1 ELSE 0 END),
+                      SUM(CASE WHEN LOWER(COALESCE(a.status,m.type,'')) LIKE '%truth%' THEN 1 ELSE 0 END),
+                      SUM(CASE WHEN LOWER(COALESCE(a.status,m.type,''))='unknown' THEN 1 ELSE 0 END)
+                    FROM attendance a LEFT JOIN members m ON a.member_code=m.member_code
+                    WHERE a.session_id=?
+                """, (sid,)).fetchone()
+                p_area_member, p_other_member, p_truth, waiting = [int(v or 0) for v in counts]
+                df = pd.read_sql("""
+                    SELECT a.id, COALESCE(a.person_name,m.name) AS name,
+                           COALESCE(m.age_category,'') AS age,
+                           COALESCE(m.member_code,a.member_code) AS member_code,
+                           COALESCE(a.status,m.type) AS type,
+                           COALESCE(m.area,'') AS area,
+                           a.record_image, a.check_in_time, a.status
+                    FROM attendance a LEFT JOIN members m ON a.member_code=m.member_code
+                    WHERE a.session_id=?
+                    ORDER BY a.check_in_time DESC, a.id DESC LIMIT 20
+                """, conn, params=[sid])
+                present = p_area_member + p_other_member + p_truth
+                area_rate = (p_area_member / area_total * 100) if area_total else 0.0
+                overall_rate = (present / area_total * 100) if area_total else 0.0
+            else:
+                present = p_area_member = p_other_member = p_truth = waiting = 0
+                area_rate = overall_rate = 0.0
+                df = pd.DataFrame()
+        finally:
+            conn.close()
+        return {"p_total": present, "p_area_member": p_area_member,
+                "p_other_member": p_other_member, "p_truth": p_truth,
+                "waiting": waiting, "area_rate": area_rate,
+                "overall_rate": overall_rate, "list": df}
 
     def get_waiting_list(self, session_id=None):
         """Return rows (id, record_image, check_in_time) for unknown attendees."""
@@ -1397,7 +1474,8 @@ class InsightFaceAttendance:
             SELECT id, record_image, check_in_time
             FROM   attendance
             WHERE  session_id=? AND status='unknown'
-            ORDER  BY check_in_time DESC
+            ORDER  BY check_in_time DESC, id DESC
+            LIMIT 10
         """, (sid,)).fetchall()
         conn.close()
         return rows
