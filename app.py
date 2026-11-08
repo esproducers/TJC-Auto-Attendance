@@ -495,6 +495,8 @@ class AutoAttendanceApp(ctk.CTk):
         
         self.capture_feedback = {"msg": "", "expiry": 0, "color": (0,255,0)}
         self.image_cache = {} # Map img_path -> CTKImage
+        self._thumbnail_cache = {}  # (path, size) -> PIL image; decoded off the UI thread
+        self._thumbnail_executor = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="MemberThumb")
         self.is_admin = False
         if "admin_pass" not in self.settings:
             self.settings["admin_pass"] = "admin123"
@@ -1943,12 +1945,7 @@ class AutoAttendanceApp(ctk.CTk):
             img_lbl = ctk.CTkLabel(row, text="👤", width=60, height=60, fg_color="#E5E7EB" if is_dis else "#F3F4F6", corner_radius=30)
             img_lbl.grid(row=0, column=1, padx=10, pady=10)
             real_img_p = resolve_member_photo_path(code, img_p)
-            if real_img_p and os.path.exists(real_img_p):
-                try:
-                    pil = Image.open(real_img_p).resize((60, 60))
-                    ci = ctk.CTkImage(light_image=pil, size=(60, 60))
-                    img_lbl.configure(image=ci, text="")
-                except: pass
+            self._load_thumbnail_async(real_img_p, 60, img_lbl)
 
             # Name & ID
             info_f = ctk.CTkFrame(row, fg_color="transparent")
@@ -4815,6 +4812,55 @@ class AutoAttendanceApp(ctk.CTk):
         ctk.CTkButton(btn_f, text="Cancel", width=100, height=36, fg_color="#F3F4F6", text_color="#374151", hover_color="#E5E7EB", command=g_dlg.destroy).pack(side="left")
         ctk.CTkButton(btn_f, text="➕ Mark Attendance", height=36, fg_color="#10B981", hover_color="#059669", text_color="white", command=save_guest).pack(side="right", fill="x", expand=True, padx=(10, 0))
 
+    def _load_thumbnail_async(self, path, size, label):
+        """Decode/resize a member photo off the Tk thread; create CTkImage on the UI thread."""
+        if not path or not os.path.isfile(path):
+            return
+        cache_key = (os.path.abspath(path), int(size))
+        cached = self._thumbnail_cache.get(cache_key)
+        if cached is not None:
+            try:
+                ci = ctk.CTkImage(light_image=cached, dark_image=cached, size=(size, size))
+                label.configure(image=ci, text="")
+                label.image = ci
+            except Exception:
+                pass
+            return
+        if getattr(label, "_thumbnail_pending", False):
+            return
+        label._thumbnail_pending = True
+
+        def decode():
+            try:
+                with Image.open(path) as source:
+                    source = source.convert("RGB")
+                    source.thumbnail((size * 2, size * 2))
+                    return source.copy()
+            except Exception:
+                return None
+
+        future = self._thumbnail_executor.submit(decode)
+        def completed(fut):
+            pil = fut.result()
+            def apply_result():
+                try:
+                    if not label.winfo_exists():
+                        return
+                    label._thumbnail_pending = False
+                    if pil is None:
+                        return
+                    self._thumbnail_cache[cache_key] = pil
+                    ci = ctk.CTkImage(light_image=pil, dark_image=pil, size=(size, size))
+                    label.configure(image=ci, text="")
+                    label.image = ci
+                except Exception:
+                    pass
+            try:
+                self.after(0, apply_result)
+            except Exception:
+                pass
+        future.add_done_callback(completed)
+
     def manual_add_popup(self):
         if not hasattr(self.backend, "active_session_id") or not self.backend.active_session_id:
             messagebox.showwarning("No Session", "Please start a session first.")
@@ -4861,68 +4907,77 @@ class AutoAttendanceApp(ctk.CTk):
         select_all_cb = ctk.CTkCheckBox(top_ctrl, text="Select All", variable=select_all_var, font=("Arial", 11, "bold"), command=toggle_select_all)
         select_all_cb.pack(side="right")
 
-        def populate_list():
-            for w in list_f.winfo_children():
-                w.destroy()
-            item_checkboxes.clear()
-            select_all_var.set(False)
+        page_state = {"offset": 0, "query": None, "loading": False}
+        page_size = 30
+        more_btn = ctk.CTkButton(dialog, text="Load 30 More Members", height=32,
+                                 fg_color="#E5E7EB", text_color="#374151", hover_color="#D1D5DB")
 
+        def populate_list(reset=True):
+            if page_state["loading"]:
+                return
             q = s_entry.get().lower().strip()
-            
-            conn = sqlite3.connect("database/attendance.db")
-            # Exclude those already present in this session
-            # IS NOT NULL prevents NULL member_code from ruining SQL NOT IN
-            members = conn.execute("""
-                SELECT member_code, name, type, title, image_path FROM members 
-                WHERE member_code NOT IN (
-                    SELECT member_code FROM attendance 
-                    WHERE session_id=? AND member_code IS NOT NULL
-                )
-                AND (LOWER(name) LIKE ? OR LOWER(member_code) LIKE ?)
-                ORDER BY name ASC
-                LIMIT 100
-            """, (self.backend.active_session_id, f"%{q}%", f"%{q}%")).fetchall()
-            conn.close()
+            if reset or q != page_state["query"]:
+                for w in list_f.winfo_children():
+                    w.destroy()
+                item_checkboxes.clear()
+                select_all_var.set(False)
+                page_state["offset"] = 0
+                page_state["query"] = q
+            else:
+                try: more_btn.pack_forget()
+                except Exception: pass
 
-            if not members:
-                ctk.CTkLabel(list_f, text="No eligible members found.", font=("Arial", 12), text_color="gray").pack(pady=20)
-                info_lbl.configure(text="No matches found.")
-                update_batch_btn_text()
+            page_state["loading"] = True
+            try:
+                conn = sqlite3.connect("database/attendance.db", timeout=15)
+                members = conn.execute("""
+                    SELECT member_code, name, type, title, image_path FROM members
+                    WHERE member_code NOT IN (
+                        SELECT member_code FROM attendance
+                        WHERE session_id=? AND member_code IS NOT NULL
+                      )
+                      AND (LOWER(name) LIKE ? OR LOWER(member_code) LIKE ?)
+                    ORDER BY name COLLATE NOCASE ASC
+                    LIMIT ? OFFSET ?
+                """, (self.backend.active_session_id, f"%{q}%", f"%{q}%", page_size, page_state["offset"])).fetchall()
+                conn.close()
+            except Exception as exc:
+                page_state["loading"] = False
+                info_lbl.configure(text=f"Could not load members: {exc}")
                 return
 
-            info_lbl.configure(text=f"Showing top {len(members)} match(es)")
+            if page_state["offset"] == 0 and not members:
+                ctk.CTkLabel(list_f, text="No eligible members found.", font=("Arial", 12), text_color="gray").pack(pady=20)
+                info_lbl.configure(text="No matches found.")
+                page_state["loading"] = False
+                update_batch_btn_text()
+                return
 
             for code, name, mtype, title, img_path in members:
                 item_f = ctk.CTkFrame(list_f, fg_color="#FFFFFF", height=50, corner_radius=6, border_width=1, border_color="#E5E7EB")
                 item_f.pack(fill="x", pady=2)
                 item_f.pack_propagate(False)
-
                 cb_var = tk.BooleanVar(value=False)
                 item_checkboxes[code] = (cb_var, name, mtype)
-
                 cb = ctk.CTkCheckBox(item_f, text="", variable=cb_var, width=20, command=update_batch_btn_text)
                 cb.pack(side="left", padx=(10, 4))
-
-                # Profile photo thumbnail
                 photo_lbl = ctk.CTkLabel(item_f, text="👤", font=("Arial", 18), width=36)
                 photo_lbl.pack(side="left", padx=(0, 6))
-                if img_path and os.path.exists(img_path):
-                    try:
-                        pil = Image.open(img_path).resize((36, 36))
-                        ci = ctk.CTkImage(light_image=pil, size=(36, 36))
-                        photo_lbl.configure(image=ci, text="")
-                    except Exception:
-                        pass
-
+                self._load_thumbnail_async(img_path, 36, photo_lbl)
                 disp_title = f"{title} " if title else ""
-                lbl_text = f"{disp_title}{name} ({code})"
-                ctk.CTkLabel(item_f, text=lbl_text, font=("Arial", 11, "bold"), text_color="#1F2937", anchor="w").pack(side="left", padx=5)
+                ctk.CTkLabel(item_f, text=f"{disp_title}{name} ({code})", font=("Arial", 11, "bold"), text_color="#1F2937", anchor="w").pack(side="left", padx=5)
+                ctk.CTkButton(item_f, text="➕ Add", width=65, height=28, font=("Arial", 10, "bold"),
+                              fg_color="#28A745", hover_color="#218838", text_color="white",
+                              command=lambda c=code, n=name, t=mtype: [self.do_manual_mark(c, n, t), populate_list()]).pack(side="right", padx=8)
 
-                add_btn = ctk.CTkButton(item_f, text="➕ Add", width=65, height=28, font=("Arial", 10, "bold"),
-                                        fg_color="#28A745", hover_color="#218838", text_color="white",
-                                        command=lambda c=code, n=name, t=mtype: [self.do_manual_mark(c, n, t), populate_list()])
-                add_btn.pack(side="right", padx=8)
-
+            page_state["offset"] += len(members)
+            info_lbl.configure(text=f"Showing {page_state['offset']} member(s); load more to see additional matches")
+            if len(members) == page_size:
+                more_btn.configure(command=lambda: populate_list(reset=False))
+                more_btn.pack(fill="x", padx=20, pady=(0, 4), before=bottom_bar)
+            else:
+                more_btn.pack_forget()
+            page_state["loading"] = False
             update_batch_btn_text()
 
         def add_batch_selected():
@@ -5021,55 +5076,62 @@ class AutoAttendanceApp(ctk.CTk):
         list_f = ctk.CTkScrollableFrame(dialog, fg_color="#F9FAFB", corner_radius=8)
         list_f.pack(fill="both", expand=True, padx=20, pady=(0, 15))
 
-        def populate_present_list():
-            for w in list_f.winfo_children():
-                w.destroy()
+        present_state = {"offset": 0, "query": None, "loading": False}
+        present_page_size = 30
+        present_more_btn = ctk.CTkButton(dialog, text="Load 30 More Attendees", height=32,
+                                         fg_color="#E5E7EB", text_color="#374151", hover_color="#D1D5DB")
+
+        def populate_present_list(reset=True):
+            if present_state["loading"]:
+                return
             q = s_entry.get().lower().strip()
-
-            conn = sqlite3.connect("database/attendance.db")
-            # Fetch members present in active session
-            present_members = conn.execute("""
-                SELECT a.member_code, COALESCE(m.name, a.person_name, 'Unknown') AS name,
-                       COALESCE(m.type, a.status, 'Member') AS mtype, m.title, m.image_path
-                FROM attendance a
-                LEFT JOIN members m ON a.member_code = m.member_code
-                WHERE a.session_id = ? AND (a.member_code IS NOT NULL OR (a.status IS NOT NULL AND a.status != 'unknown'))
-                AND (LOWER(COALESCE(m.name, a.person_name, '')) LIKE ? OR LOWER(COALESCE(a.member_code, '')) LIKE ?)
-                ORDER BY name ASC
-            """, (self.backend.active_session_id, f"%{q}%", f"%{q}%")).fetchall()
-            conn.close()
-
-            if not present_members:
+            if reset or q != present_state["query"]:
+                for w in list_f.winfo_children(): w.destroy()
+                present_state["offset"] = 0
+                present_state["query"] = q
+            else:
+                present_more_btn.pack_forget()
+            present_state["loading"] = True
+            try:
+                conn = sqlite3.connect("database/attendance.db", timeout=15)
+                present_members = conn.execute("""
+                    SELECT a.member_code, COALESCE(m.name, a.person_name, 'Unknown') AS name,
+                           COALESCE(m.type, a.status, 'Member') AS mtype, m.title, m.image_path
+                    FROM attendance a LEFT JOIN members m ON a.member_code = m.member_code
+                    WHERE a.session_id = ? AND (a.member_code IS NOT NULL OR (a.status IS NOT NULL AND a.status != 'unknown'))
+                      AND (LOWER(COALESCE(m.name, a.person_name, '')) LIKE ? OR LOWER(COALESCE(a.member_code, '')) LIKE ?)
+                    ORDER BY name COLLATE NOCASE ASC LIMIT ? OFFSET ?
+                """, (self.backend.active_session_id, f"%{q}%", f"%{q}%", present_page_size, present_state["offset"])).fetchall()
+                conn.close()
+            except Exception as exc:
+                present_state["loading"] = False
+                info_lbl.configure(text=f"Could not load attendees: {exc}")
+                return
+            if present_state["offset"] == 0 and not present_members:
                 ctk.CTkLabel(list_f, text="No present attendees match search.", font=("Arial", 12), text_color="gray").pack(pady=20)
                 info_lbl.configure(text="No matching attendees.")
+                present_state["loading"] = False
                 return
-
-            info_lbl.configure(text=f"Total {len(present_members)} attendee(s) present in current session")
-
             for code, name, mtype, title, img_path in present_members:
                 item_f = ctk.CTkFrame(list_f, fg_color="#FFFFFF", height=50, corner_radius=6, border_width=1, border_color="#E5E7EB")
                 item_f.pack(fill="x", pady=2)
                 item_f.pack_propagate(False)
-
-                # Profile photo thumbnail
                 photo_lbl = ctk.CTkLabel(item_f, text="👤", font=("Arial", 18), width=36)
                 photo_lbl.pack(side="left", padx=(10, 6))
-                if img_path and os.path.exists(img_path):
-                    try:
-                        pil = Image.open(img_path).resize((36, 36))
-                        ci = ctk.CTkImage(light_image=pil, size=(36, 36))
-                        photo_lbl.configure(image=ci, text="")
-                    except Exception:
-                        pass
-
+                self._load_thumbnail_async(img_path, 36, photo_lbl)
                 disp_title = f"{title} " if title else ""
-                lbl_text = f"{disp_title}{name} ({code})"
-                ctk.CTkLabel(item_f, text=lbl_text, font=("Arial", 11, "bold"), text_color="#1F2937", anchor="w").pack(side="left", padx=5)
-
-                rem_btn = ctk.CTkButton(item_f, text="🗑️ Remove", width=80, height=28, font=("Arial", 10, "bold"),
-                                        fg_color="#DC2626", hover_color="#B91C1C", text_color="white",
-                                        command=lambda c=code, n=name: execute_removal(c, n))
-                rem_btn.pack(side="right", padx=8)
+                ctk.CTkLabel(item_f, text=f"{disp_title}{name} ({code})", font=("Arial", 11, "bold"), text_color="#1F2937", anchor="w").pack(side="left", padx=5)
+                ctk.CTkButton(item_f, text="🗑️ Remove", width=80, height=28, font=("Arial", 10, "bold"),
+                              fg_color="#DC2626", hover_color="#B91C1C", text_color="white",
+                              command=lambda c=code, n=name: execute_removal(c, n)).pack(side="right", padx=8)
+            present_state["offset"] += len(present_members)
+            info_lbl.configure(text=f"Showing {present_state['offset']} of current-session attendees")
+            if len(present_members) == present_page_size:
+                present_more_btn.configure(command=lambda: populate_present_list(reset=False))
+                present_more_btn.pack(fill="x", padx=20, pady=(0, 4))
+            else:
+                present_more_btn.pack_forget()
+            present_state["loading"] = False
 
         def execute_removal(code, name):
             if messagebox.askyesno("Confirm Removal", f"Remove '{name}' ({code}) from the current session?", parent=dialog):
@@ -6118,15 +6180,36 @@ class AutoAttendanceApp(ctk.CTk):
                             return
                             
                 prefix = self.settings.get("member_prefix", "") if not code else ""
-                try:
-                    data["title"] = title_cb.get()
-                    self.backend.register_member(data, force_code=code, prefix=prefix)
-                except Exception as e:
-                    messagebox.showerror("Save Error", f"Backend failure: {str(e)}", parent=dialog)
-                    return
-                
-                self.refresh_member_table()
-                dialog.destroy()
+                data["title"] = title_cb.get()
+                save_btn.configure(state="disabled", text="Saving member...")
+                dialog.configure(cursor="watch")
+
+                def save_worker():
+                    try:
+                        saved_code = self.backend.register_member(data, force_code=code, prefix=prefix)
+                        result = (True, saved_code)
+                    except Exception as exc:
+                        result = (False, str(exc))
+                    def finish_save():
+                        try:
+                            if not dialog.winfo_exists():
+                                return
+                            dialog.configure(cursor="")
+                            if result[0]:
+                                self.refresh_member_table()
+                                dialog.destroy()
+                                messagebox.showinfo("Saved", f"Member {result[1]} saved successfully.", parent=self)
+                            else:
+                                save_btn.configure(state="normal", text="💾  Save")
+                                messagebox.showerror("Save Error", f"Backend failure: {result[1]}", parent=dialog)
+                        except Exception as ui_exc:
+                            print(f"[MEMBER SAVE UI] {ui_exc}")
+                    try:
+                        self.gui_queue.put(finish_save)
+                    except Exception:
+                        pass
+
+                threading.Thread(target=save_worker, name="MemberSaveWorker", daemon=True).start()
 
             save_btn = ctk.CTkButton(footer_frame, text="💾  Save", fg_color="#28A745", hover_color="#218838",
                                      font=("Arial", 14, "bold"), width=220, height=44, command=save)
