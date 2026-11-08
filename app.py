@@ -646,11 +646,90 @@ class AutoAttendanceApp(ctk.CTk):
             except: pass
 
     def on_closing(self):
-        self.camera_running = False
+        """Ask for confirmation, then shut down capture and workers cleanly."""
+        if getattr(self, "_shutdown_requested", False):
+            return
+
+        confirm = messagebox.askyesno(
+            "Exit Attendance System",
+            "Are you sure you want to exit the attendance system?\n\n"
+            "The camera will stop and pending background work will be allowed to finish.\n"
+            "Your saved attendance records will not be deleted.",
+            parent=self,
+        )
+        if not confirm:
+            return
+
+        self._shutdown_requested = True
+        self._shutdown_started_at = time.monotonic()
+        self._shutdown_camera_released = False
         self.is_marking = False
-        if hasattr(self, 'backend') and self.backend and self.backend.camera:
-            self.backend.camera.release()
-        self.destroy()
+        self.camera_running = False
+
+        # Prevent repeated clicks while the camera/recognition workers finish.
+        exit_button = getattr(self, "exit_btn", None)
+        if exit_button is not None:
+            try:
+                exit_button.configure(state="disabled", text="Closing safely...")
+            except Exception:
+                pass
+
+        # Poll asynchronously so the GUI does not freeze while workers stop.
+        self.after(100, self._finish_shutdown_when_idle)
+
+    def _finish_shutdown_when_idle(self):
+        """Wait for camera and face-processing workers before releasing resources."""
+        if not getattr(self, "_shutdown_requested", False):
+            return
+
+        camera_thread = getattr(self, "camera_thread", None)
+        face_thread = getattr(self, "_face_worker_thread", None)
+        camera_alive = camera_thread is not None and camera_thread.is_alive()
+        face_alive = face_thread is not None and face_thread.is_alive()
+
+        # Some network cameras can remain blocked inside read(). If the reader
+        # has not stopped after a short grace period, release the device once
+        # to unblock it; the face worker still gets time to finish its frame.
+        if (camera_alive
+                and not getattr(self, "_shutdown_camera_released", False)
+                and time.monotonic() - getattr(self, "_shutdown_started_at", time.monotonic()) > 3.0):
+            try:
+                backend = getattr(self, "backend", None)
+                camera = getattr(backend, "camera", None) if backend else None
+                if camera is not None:
+                    camera.release()
+            except Exception as exc:
+                print(f"[SHUTDOWN] Early camera release warning: {exc}")
+            self._shutdown_camera_released = True
+
+        if camera_alive or face_alive:
+            # Continue checking without blocking Tk's event loop.
+            try:
+                self.after(100, self._finish_shutdown_when_idle)
+            except Exception:
+                pass
+            return
+
+        # The camera reader has stopped; it is now safe to release the device.
+        try:
+            backend = getattr(self, "backend", None)
+            camera = getattr(backend, "camera", None) if backend else None
+            if camera is not None:
+                camera.release()
+        except Exception as exc:
+            print(f"[SHUTDOWN] Camera release warning: {exc}")
+
+        # Persist current application settings without touching attendance data.
+        try:
+            if hasattr(self, "settings"):
+                self.save_settings()
+        except Exception as exc:
+            print(f"[SHUTDOWN] Settings save warning: {exc}")
+
+        try:
+            self.destroy()
+        except Exception:
+            pass
 
     # ── Settings ──────────────────────────────────────────────────────────────
 
@@ -732,6 +811,19 @@ class AutoAttendanceApp(ctk.CTk):
                                        height=38, fg_color="#F3F4F6", text_color="#374151",
                                        hover_color="#E5E7EB", command=self.on_login_click)
         self.login_btn.pack(padx=12, fill="x")
+
+        # Dedicated safe-exit control, kept with the fixed sidebar controls.
+        self.exit_btn = ctk.CTkButton(
+            self.sidebar_bottom,
+            text="⏻  EXIT PROGRAM",
+            font=("Arial", 12, "bold"),
+            height=38,
+            fg_color="#DC3545",
+            text_color="#FFFFFF",
+            hover_color="#B02A37",
+            command=self.on_closing,
+        )
+        self.exit_btn.pack(padx=12, pady=(8, 0), fill="x")
 
         # Scrollable Navigation Container (prevents clipping on smaller screen heights)
         self.nav_scroll = ctk.CTkScrollableFrame(self.sidebar, fg_color="transparent")
@@ -1941,67 +2033,104 @@ class AutoAttendanceApp(ctk.CTk):
         self.refresh_logs_table(reset=True)
 
     def load_older_logs(self):
-        self.logs_offset = getattr(self, "logs_offset", 0) + getattr(self, "logs_page_size", 10)
+        """Append the next page of sessions without removing the current page."""
+        if getattr(self, "_logs_loading", False):
+            return
         self.refresh_logs_table(reset=False)
 
     def refresh_logs_table(self, reset=False):
-        """Load only 10 sessions at a time; old history remains in SQLite."""
+        """Show sessions in pages of 10; older records remain in the database."""
+        if getattr(self, "_logs_loading", False):
+            return
         if reset:
             self.logs_offset = 0
-        for w in self.logs_scroll.winfo_children():
-            w.destroy()
+            for w in self.logs_scroll.winfo_children():
+                w.destroy()
+            self._logs_end_reached = False
+        elif getattr(self, "_logs_end_reached", False):
+            return
+
+        self._logs_loading = True
+        if hasattr(self, "logs_older_btn"):
+            self.logs_older_btn.configure(state="disabled", text="Loading...")
 
         search_text = self.logs_search_entry.get().strip() if hasattr(self, "logs_search_entry") else ""
-        conn = sqlite3.connect("database/attendance.db", timeout=10)
-        conn.execute("PRAGMA busy_timeout=10000")
+        page_size = getattr(self, "logs_page_size", 10)
+        offset = getattr(self, "logs_offset", 0)
+        conn = None
         try:
+            conn = sqlite3.connect("database/attendance.db", timeout=15)
+            conn.execute("PRAGMA busy_timeout=15000")
             sessions = conn.execute("""
                 SELECT s.id, s.title, s.date, s.start_time,
-                       SUM(CASE WHEN a.status = 'unknown' THEN 1 ELSE 0 END) AS unk_count
-                FROM sessions s
-                JOIN attendance a ON a.session_id = s.id
-                WHERE (? = '' OR LOWER(COALESCE(s.title,'')) LIKE ? OR CAST(s.date AS TEXT) LIKE ?)
-                GROUP BY s.id
-                ORDER BY s.date DESC, s.start_time DESC
+                       COALESCE(u.unk_count, 0) AS unk_count
+                FROM sessions AS s
+                LEFT JOIN (
+                    SELECT session_id,
+                           SUM(CASE WHEN LOWER(COALESCE(status, '')) = 'unknown' THEN 1 ELSE 0 END) AS unk_count
+                    FROM attendance
+                    GROUP BY session_id
+                ) AS u ON u.session_id = s.id
+                WHERE (? = ''
+                       OR LOWER(COALESCE(s.title, '')) LIKE ?
+                       OR CAST(s.date AS TEXT) LIKE ?)
+                ORDER BY s.date DESC, s.start_time DESC, s.id DESC
                 LIMIT ? OFFSET ?
             """, (search_text.lower(), f"%{search_text.lower()}%", f"%{search_text}%",
-                  self.logs_page_size, self.logs_offset)).fetchall()
+                  page_size, offset)).fetchall()
+        except Exception as exc:
+            print(f"[LOGS] Failed to load attendance sessions: {exc}")
+            ctk.CTkLabel(self.logs_scroll,
+                         text=f"Unable to load attendance logs: {exc}",
+                         font=("Arial", 12), text_color="#DC3545").pack(pady=20)
+            self._logs_loading = False
+            if hasattr(self, "logs_older_btn"):
+                self.logs_older_btn.configure(state="normal", text="Retry Loading Sessions")
+            return
         finally:
-            conn.close()
+            if conn is not None:
+                conn.close()
 
-        if not sessions and self.logs_offset == 0:
-            ctk.CTkLabel(self.logs_scroll, text="No attendance logs found for this search.",
-                         font=("Arial", 13), text_color="gray").pack(pady=40)
-        elif not sessions:
-            ctk.CTkLabel(self.logs_scroll, text="No more older sessions.",
+        if not sessions:
+            self._logs_end_reached = True
+            msg = "No attendance logs found for this search." if offset == 0 else "No more older sessions."
+            ctk.CTkLabel(self.logs_scroll, text=msg,
                          font=("Arial", 12), text_color="gray").pack(pady=20)
+        else:
+            for sid, title, dt, st, unk_count in sessions:
+                row = ctk.CTkFrame(self.logs_scroll, fg_color="#FFFFFF", height=60, corner_radius=8,
+                                   border_width=1, border_color="#E5E7EB")
+                row.pack(fill="x", pady=4, padx=8)
+                row.pack_propagate(False)
+                info_f = ctk.CTkFrame(row, fg_color="transparent")
+                info_f.pack(side="left", padx=15, pady=10)
+                ctk.CTkLabel(info_f, text=f"{dt}   {str(title or '').upper()}",
+                             font=("Arial", 13, "bold"), text_color="#1F2937").pack(anchor="w")
+                ctk.CTkLabel(info_f, text=f"Started at {str(st or '')[11:16]}",
+                             font=("Arial", 10), text_color="#6B7280").pack(anchor="w")
+                btn_f = ctk.CTkFrame(row, fg_color="transparent")
+                btn_f.pack(side="right", padx=15)
+                b_color = "#DC3545" if (unk_count and unk_count > 0) else "#007BFF"
+                h_color = "#C82333" if (unk_count and unk_count > 0) else "#0056b3"
+                ctk.CTkButton(btn_f, text="View Attendees", width=140, height=32,
+                    font=("Arial", 11, "bold"), fg_color=b_color, hover_color=h_color,
+                    command=lambda session_id=sid: self.show_session_details_popup(session_id)).pack(side="left", padx=5)
+                if self.is_admin:
+                    ctk.CTkButton(btn_f, text="X", width=32, height=32, font=("Arial", 11, "bold"),
+                        fg_color="transparent", text_color="#DC3545", border_width=1,
+                        border_color="#DC3545", hover_color="#FEE2E2",
+                        command=lambda session_id=sid: self.delete_session_log(session_id)).pack(side="left")
+            # Advance by the number actually returned, not by a fixed 10. This
+            # prevents skipping rows when the final page contains fewer records.
+            self.logs_offset = offset + len(sessions)
+            self._logs_end_reached = len(sessions) < page_size
 
-        for sid, title, dt, st, unk_count in sessions:
-            row = ctk.CTkFrame(self.logs_scroll, fg_color="#FFFFFF", height=60, corner_radius=8,
-                               border_width=1, border_color="#E5E7EB")
-            row.pack(fill="x", pady=4, padx=8)
-            row.pack_propagate(False)
-            info_f = ctk.CTkFrame(row, fg_color="transparent")
-            info_f.pack(side="left", padx=15, pady=10)
-            ctk.CTkLabel(info_f, text=f"{dt}   {str(title).upper()}", font=("Arial", 13, "bold"),
-                         text_color="#1F2937").pack(anchor="w")
-            ctk.CTkLabel(info_f, text=f"Started at {str(st)[11:16]}", font=("Arial", 10),
-                         text_color="#6B7280").pack(anchor="w")
-            btn_f = ctk.CTkFrame(row, fg_color="transparent")
-            btn_f.pack(side="right", padx=15)
-            b_color = "#DC3545" if (unk_count and unk_count > 0) else "#007BFF"
-            h_color = "#C82333" if (unk_count and unk_count > 0) else "#0056b3"
-            ctk.CTkButton(btn_f, text="View Attendees", width=140, height=32,
-                font=("Arial", 11, "bold"), fg_color=b_color, hover_color=h_color,
-                command=lambda session_id=sid: self.show_session_details_popup(session_id)).pack(side="left", padx=5)
-            if self.is_admin:
-                ctk.CTkButton(btn_f, text="X", width=32, height=32, font=("Arial", 11, "bold"),
-                    fg_color="transparent", text_color="#DC3545", border_width=1,
-                    border_color="#DC3545", hover_color="#FEE2E2",
-                    command=lambda session_id=sid: self.delete_session_log(session_id)).pack(side="left")
-
+        self._logs_loading = False
         if hasattr(self, "logs_older_btn"):
-            self.logs_older_btn.configure(state=("normal" if len(sessions) == self.logs_page_size else "disabled"))
+            if self._logs_end_reached:
+                self.logs_older_btn.configure(state="disabled", text="No Older Sessions")
+            else:
+                self.logs_older_btn.configure(state="normal", text="Load Older Sessions")
 
     def delete_session_log(self, session_id):
         if not self.is_admin:
@@ -2308,167 +2437,229 @@ class AutoAttendanceApp(ctk.CTk):
         threading.Thread(target=fetch_data, daemon=True).start()
 
     def show_session_details_popup(self, session_id):
-        conn = sqlite3.connect("database/attendance.db")
-        sess = conn.execute("SELECT title, date, target_count FROM sessions WHERE id=?", (session_id,)).fetchone()
-        if not sess: 
-            conn.close()
+        """Open a session report without blocking the main application during DB reads/rendering."""
+        if getattr(self, "_session_detail_opening", False):
             return
-        title_val, dt_val, target_val = sess
-        
-        # Calculate session-specific stats
-        total_sys_m = conn.execute("SELECT COUNT(*) FROM members WHERE (is_disabled = 0 OR is_disabled IS NULL)").fetchone()[0]
-        # Denominator: Total 'Area Member' DB count
-        area_total = conn.execute("SELECT COUNT(*) FROM members WHERE type='Area Member' AND (is_disabled = 0 OR is_disabled IS NULL)").fetchone()[0]
-
-        attendees = conn.execute("""
-            SELECT a.id, COALESCE(a.person_name, m.name), a.status, a.check_in_time, a.record_image,
-                   m.age_category, a.member_code, m.area, m.title
-            FROM attendance a
-            LEFT JOIN members m ON a.member_code = m.member_code
-            WHERE a.session_id = ?
-            ORDER BY a.check_in_time ASC
-        """, (session_id,)).fetchall()
-        conn.close()
-
-        # Grouping
-        area_list = [a for a in attendees if a[2].lower() == 'area member']
-        other_list = [a for a in attendees if a[2].lower() == 'other area member']
-        gospel_list = [a for a in attendees if 'truth' in a[2].lower()]
-        unknown_list = [a for a in attendees if a[2].lower() == 'unknown']
-        
-        p_total = len(area_list) + len(other_list) + len(gospel_list)
-        area_present = len(area_list)
-            
-        area_rate = (area_present / area_total * 100) if area_total > 0 else 0
-        overall_rate = (p_total / area_total * 100) if area_total > 0 else 0
-        special_rate = (p_total / target_val * 100) if (target_val and target_val > 0) else 0
+        self._session_detail_opening = True
 
         popup = ctk.CTkToplevel(self)
         popup.title(f"Attendance Report - Session {session_id}")
         popup.geometry("900x800")
         popup.attributes("-topmost", True)
-        popup.grab_set()
+        loading_label = ctk.CTkLabel(popup, text="Loading session attendance...\nPlease wait.",
+                                     font=("Arial", 14), text_color="#475569")
+        loading_label.pack(expand=True)
+        result_queue = queue.Queue(maxsize=1)
 
-        # Header - Report Title & Edit
-        hdr = ctk.CTkFrame(popup, fg_color="transparent")
-        hdr.pack(fill="x", padx=30, pady=(20, 10))
-        
-        title_f = ctk.CTkFrame(hdr, fg_color="transparent")
-        title_f.pack(side="left")
-        ctk.CTkLabel(title_f, text="SESSION ATTENDANCE REPORT", font=("Arial", 22, "bold"), text_color="#111827").pack(anchor="w")
-        ctk.CTkLabel(title_f, text=f"Generated on {dt_val}", font=("Arial", 12), text_color="#6B7280").pack(anchor="w")
-
-        edit_f = ctk.CTkFrame(hdr, fg_color="transparent")
-        edit_f.pack(side="right")
-        ctk.CTkLabel(edit_f, text="Edit Title: ", font=("Arial", 11, "bold")).pack(side="left")
-        title_e = ctk.CTkEntry(edit_f, width=160, height=32)
-        title_e.insert(0, title_val)
-        title_e.pack(side="left", padx=5)
-
-        ctk.CTkLabel(edit_f, text="Target: ", font=("Arial", 11, "bold")).pack(side="left", padx=(10, 0))
-        target_e = ctk.CTkEntry(edit_f, width=60, height=32)
-        target_e.insert(0, str(target_val or 0))
-        target_e.pack(side="left", padx=5)
-
-        def save_session_data():
-            nt = title_e.get().strip()
-            tc = target_e.get().strip()
+        def fetch_session_data():
+            conn = None
             try:
-                tc_int = int(tc) if tc else 0
-            except:
-                tc_int = 0
-            
-            if nt:
-                c = sqlite3.connect("database/attendance.db")
-                c.execute("UPDATE sessions SET title=?, target_count=? WHERE id=?", (nt, tc_int, session_id))
-                c.commit()
-                c.close()
-                popup.destroy()
-                self.show_session_details_popup(session_id)
-                self.refresh_sessions_summary()
-                messagebox.showinfo("Success", "Session data updated.")
+                conn = sqlite3.connect("database/attendance.db", timeout=20)
+                conn.execute("PRAGMA busy_timeout=20000")
+                sess = conn.execute(
+                    "SELECT title, date, target_count FROM sessions WHERE id=?", (session_id,)
+                ).fetchone()
+                if not sess:
+                    result_queue.put((None, "This session could not be found in the attendance database."))
+                    return
+                area_total = conn.execute(
+                    "SELECT COUNT(*) FROM members WHERE type='Area Member' AND (is_disabled=0 OR is_disabled IS NULL)"
+                ).fetchone()[0]
+                attendees = conn.execute("""
+                    SELECT a.id, COALESCE(a.person_name, m.name, 'Unknown'), a.status,
+                           a.check_in_time, a.record_image, m.age_category,
+                           a.member_code, m.area, m.title
+                    FROM attendance AS a
+                    LEFT JOIN members AS m ON a.member_code = m.member_code
+                    WHERE a.session_id = ?
+                    ORDER BY a.check_in_time ASC, a.id ASC
+                """, (session_id,)).fetchall()
+                result_queue.put(((sess, area_total, attendees), None))
+            except Exception as exc:
+                result_queue.put((None, str(exc)))
+            finally:
+                if conn is not None:
+                    conn.close()
 
-        ctk.CTkButton(edit_f, text="Update", width=60, height=32, command=save_session_data).pack(side="left", padx=5)
+        def poll_result():
+            try:
+                payload, error = result_queue.get_nowait()
+            except queue.Empty:
+                if popup.winfo_exists():
+                    popup.after(100, poll_result)
+                return
 
-        # Stats Cards
-        card_row = ctk.CTkFrame(popup, fg_color="transparent")
-        card_row.pack(fill="x", padx=30, pady=10)
-        
-        stats = [
-            ("PRESENT TODAY", str(p_total), "#28A745"),
-            ("AREA MEMBER", str(len(area_list)), "#007BFF"),
-            ("OTHER AREA MEMBER", str(len(other_list)), "#6610f2"),
-            ("TRUTH SEEKER", str(len(gospel_list)), "#17A2B8"),
-            ("AREA RATE%", f"{area_rate:.1f}%", "#6F42C1"),
-            ("OVERALL RATE%", f"{overall_rate:.1f}%", "#FFC107"),
-            ("SPECIAL RATE%", f"{special_rate:.1f}%", "#E11D48")
-        ]
+            if error:
+                self._session_detail_opening = False
+                if popup.winfo_exists():
+                    loading_label.configure(text=f"Unable to load this session:\n{error}")
+                    ctk.CTkButton(popup, text="Close", command=popup.destroy).pack(pady=15)
+                return
+            if not popup.winfo_exists():
+                self._session_detail_opening = False
+                return
 
-        for i, (l, v, c) in enumerate(stats):
-            card_row.grid_columnconfigure(i, weight=1)
-            cf = ctk.CTkFrame(card_row, fg_color="#FFFFFF", border_width=1, border_color="#E5E7EB", corner_radius=10)
-            cf.grid(row=0, column=i, padx=5, sticky="nsew")
-            ctk.CTkLabel(cf, text=l, font=("Arial", 10, "bold"), text_color="#6B7280").pack(pady=(10, 0))
-            ctk.CTkLabel(cf, text=v, font=("Arial", 22, "bold"), text_color=c).pack(pady=(0, 10))
+            loading_label.destroy()
+            (sess, area_total, attendees) = payload
+            title_val, dt_val, target_val = sess
+            area_list = [a for a in attendees if str(a[2] or '').lower() == 'area member']
+            other_list = [a for a in attendees if str(a[2] or '').lower() == 'other area member']
+            gospel_list = [a for a in attendees if 'truth' in str(a[2] or '').lower()]
+            unknown_list = [a for a in attendees if str(a[2] or '').lower() == 'unknown']
+            p_total = len(area_list) + len(other_list) + len(gospel_list)
+            area_rate = (len(area_list) / area_total * 100) if area_total else 0
+            overall_rate = (p_total / area_total * 100) if area_total else 0
+            special_rate = (p_total / target_val * 100) if target_val and target_val > 0 else 0
 
-        # Main List Content
-        sc = ctk.CTkScrollableFrame(popup, fg_color="#F9FAFB", corner_radius=12)
-        sc.pack(fill="both", expand=True, padx=30, pady=10)
+            hdr = ctk.CTkFrame(popup, fg_color="transparent")
+            hdr.pack(fill="x", padx=20, pady=(15, 8))
+            title_f = ctk.CTkFrame(hdr, fg_color="transparent")
+            title_f.pack(side="left")
+            ctk.CTkLabel(title_f, text="SESSION ATTENDANCE REPORT", font=("Arial", 20, "bold"),
+                         text_color="#111827").pack(anchor="w")
+            ctk.CTkLabel(title_f, text=f"Generated on {dt_val}", font=("Arial", 11),
+                         text_color="#6B7280").pack(anchor="w")
+            edit_f = ctk.CTkFrame(hdr, fg_color="transparent")
+            edit_f.pack(side="right")
+            ctk.CTkLabel(edit_f, text="Edit Title:", font=("Arial", 11, "bold")).pack(side="left")
+            title_e = ctk.CTkEntry(edit_f, width=145, height=30)
+            title_e.insert(0, title_val or "")
+            title_e.pack(side="left", padx=4)
+            ctk.CTkLabel(edit_f, text="Target:", font=("Arial", 11, "bold")).pack(side="left", padx=(6, 0))
+            target_e = ctk.CTkEntry(edit_f, width=55, height=30)
+            target_e.insert(0, str(target_val or 0))
+            target_e.pack(side="left", padx=4)
 
-        def render_section(title, attendees_subset):
-            if not attendees_subset: return
-            
-            ctk.CTkLabel(sc, text=title.upper(), font=("Arial", 14, "bold"), text_color="#374151").pack(anchor="w", padx=10, pady=(20, 5))
-            ctk.CTkFrame(sc, height=2, fg_color="#E5E7EB").pack(fill="x", padx=10, pady=(0, 10))
+            def save_session_data():
+                nt = title_e.get().strip()
+                try:
+                    tc_int = int(target_e.get().strip() or 0)
+                except ValueError:
+                    messagebox.showerror("Invalid Target", "Target must be a whole number.", parent=popup)
+                    return
+                if not nt:
+                    messagebox.showwarning("Missing Title", "Please enter a session title.", parent=popup)
+                    return
+                try:
+                    with sqlite3.connect("database/attendance.db", timeout=15) as c:
+                        c.execute("PRAGMA busy_timeout=15000")
+                        c.execute("UPDATE sessions SET title=?, target_count=? WHERE id=?", (nt, tc_int, session_id))
+                    popup.destroy()
+                    self._session_detail_opening = False
+                    self.show_session_details_popup(session_id)
+                    self.refresh_sessions_summary()
+                    if hasattr(self, "logs_scroll"):
+                        self.refresh_logs_table(reset=True)
+                except Exception as exc:
+                    messagebox.showerror("Save Error", f"Could not update session: {exc}", parent=popup)
 
-            for aid, name, status, ts, img_p, age, m_code, area, title in attendees_subset:
-                row = ctk.CTkFrame(sc, fg_color="#FFFFFF", corner_radius=8, height=80, border_width=1, border_color="#F3F4F6")
-                row.pack(fill="x", pady=4, padx=5)
-                row.pack_propagate(False)
+            ctk.CTkButton(edit_f, text="Update", width=62, height=30, command=save_session_data).pack(side="left", padx=3)
 
-                # Profile Image
-                img_lbl = ctk.CTkLabel(row, text="📷", width=65, height=65, fg_color="#F3F4F6", corner_radius=6)
-                img_lbl.pack(side="left", padx=10, pady=7)
-                real_img_p = resolve_member_photo_path(m_code, img_p)
-                if real_img_p and os.path.exists(real_img_p):
-                    try:
-                        pil = Image.open(real_img_p).resize((65, 65))
-                        ci = ctk.CTkImage(light_image=pil, size=(65, 65))
-                        img_lbl.configure(image=ci, text="")
-                    except: pass
+            card_row = ctk.CTkFrame(popup, fg_color="transparent")
+            card_row.pack(fill="x", padx=15, pady=8)
+            stats = [
+                ("PRESENT TODAY", str(p_total), "#28A745"),
+                ("AREA MEMBER", str(len(area_list)), "#007BFF"),
+                ("OTHER AREA MEMBER", str(len(other_list)), "#6610f2"),
+                ("TRUTH SEEKER", str(len(gospel_list)), "#17A2B8"),
+                ("AREA RATE%", f"{area_rate:.1f}%", "#6F42C1"),
+                ("OVERALL RATE%", f"{overall_rate:.1f}%", "#D69E00"),
+                ("SPECIAL RATE%", f"{special_rate:.1f}%", "#E11D48")
+            ]
+            for i, (label, value, color) in enumerate(stats):
+                card_row.grid_columnconfigure(i, weight=1)
+                cf = ctk.CTkFrame(card_row, fg_color="#FFFFFF", border_width=1,
+                                  border_color="#E5E7EB", corner_radius=8)
+                cf.grid(row=0, column=i, padx=3, sticky="nsew")
+                ctk.CTkLabel(cf, text=label, font=("Arial", 9, "bold"), text_color="#6B7280").pack(pady=(8, 0))
+                ctk.CTkLabel(cf, text=value, font=("Arial", 19, "bold"), text_color=color).pack(pady=(0, 8))
 
-                # Text Info
-                info_f = ctk.CTkFrame(row, fg_color="transparent")
-                info_f.pack(side="left", padx=10, fill="y", pady=10)
-                ctk.CTkLabel(info_f, text=name, font=("Arial", 15, "bold"), text_color="#111827").pack(anchor="w")
-                det_txt = f"Age: {age or '--'}  |  Title: {title or '--'}  |  Area: {area or 'Unknown'}  |  Time: {str(ts)[11:16]}"
-                ctk.CTkLabel(info_f, text=det_txt, font=("Arial", 11), text_color="#6B7280").pack(anchor="w")
+            sc = ctk.CTkScrollableFrame(popup, fg_color="#F9FAFB", corner_radius=12)
+            sc.pack(fill="both", expand=True, padx=20, pady=8)
+            sections = [
+                ("Area Member Present", area_list),
+                ("Other Area Member Present", other_list),
+                ("Truth Seeker Present", gospel_list),
+                ("Unidentified Individuals (Waiting Identification)", unknown_list)
+            ]
+            section_index = 0
+            row_index = 0
+            current_rows = []
 
-                # Action Links (Identify if Unknown)
-                if status.lower() == 'unknown':
-                    ctk.CTkButton(row, text="Identify", width=80, height=30, fg_color="#FFC107", text_color="black", font=("Arial", 11, "bold"), 
-                                  command=lambda aid=aid, ip=img_p: [popup.destroy(), self.identify_unknown_popup(aid, ip)]).pack(side="right", padx=15)
-                else:
-                    ctk.CTkLabel(row, text=status.capitalize(), font=("Arial", 10, "bold"), text_color="#007BFF", fg_color="#EBF5FF", corner_radius=10, width=80, height=26).pack(side="right", padx=15)
+            def render_next_batch():
+                nonlocal section_index, row_index, current_rows
+                if not popup.winfo_exists():
+                    self._session_detail_opening = False
+                    return
+                rendered = 0
+                while rendered < 12:
+                    if row_index >= len(current_rows):
+                        if section_index >= len(sections):
+                            self._session_detail_opening = False
+                            return
+                        section_title, current_rows = sections[section_index]
+                        section_index += 1
+                        row_index = 0
+                        if current_rows:
+                            ctk.CTkLabel(sc, text=section_title.upper(), font=("Arial", 13, "bold"),
+                                         text_color="#374151").pack(anchor="w", padx=10, pady=(15, 5))
+                            ctk.CTkFrame(sc, height=2, fg_color="#E5E7EB").pack(fill="x", padx=10, pady=(0, 8))
+                        else:
+                            continue
+                    record = current_rows[row_index]
+                    row_index += 1
+                    rendered += 1
+                    aid, name, status, ts, img_p, age, m_code, area, member_title = record
+                    row = ctk.CTkFrame(sc, fg_color="#FFFFFF", corner_radius=8, height=76,
+                                       border_width=1, border_color="#F3F4F6")
+                    row.pack(fill="x", pady=3, padx=5)
+                    row.pack_propagate(False)
+                    img_lbl = ctk.CTkLabel(row, text="📷", width=60, height=60,
+                                           fg_color="#F3F4F6", corner_radius=6)
+                    img_lbl.pack(side="left", padx=8, pady=6)
+                    real_img_p = resolve_member_photo_path(m_code, img_p)
+                    if real_img_p and os.path.exists(real_img_p):
+                        try:
+                            with Image.open(real_img_p) as source_img:
+                                pil = source_img.convert("RGB").resize((60, 60))
+                            ci = ctk.CTkImage(light_image=pil, size=(60, 60))
+                            img_lbl.configure(image=ci, text="")
+                            img_lbl.image = ci
+                        except Exception as image_exc:
+                            print(f"[LOGS] Could not load attendee thumbnail {real_img_p}: {image_exc}")
+                    info_f = ctk.CTkFrame(row, fg_color="transparent")
+                    info_f.pack(side="left", padx=8, fill="y", pady=9)
+                    ctk.CTkLabel(info_f, text=str(name or "Unknown"), font=("Arial", 14, "bold"),
+                                 text_color="#111827").pack(anchor="w")
+                    det_txt = f"Age: {age or '--'}  |  Title: {member_title or '--'}  |  Area: {area or 'Unknown'}  |  Time: {str(ts or '')[11:16]}"
+                    ctk.CTkLabel(info_f, text=det_txt, font=("Arial", 10), text_color="#6B7280").pack(anchor="w")
+                    if str(status or '').lower() == 'unknown':
+                        ctk.CTkButton(row, text="Identify", width=80, height=30, fg_color="#FFC107",
+                            text_color="black", font=("Arial", 11, "bold"),
+                            command=lambda attendee_id=aid, image_path=img_p: [popup.destroy(),
+                                setattr(self, "_session_detail_opening", False),
+                                self.identify_unknown_popup(attendee_id, image_path)]).pack(side="right", padx=12)
+                    else:
+                        ctk.CTkLabel(row, text=str(status or "Present").capitalize(), font=("Arial", 10, "bold"),
+                                     text_color="#007BFF", fg_color="#EBF5FF", corner_radius=10,
+                                     width=80, height=26).pack(side="right", padx=12)
+                popup.after(1, render_next_batch)
 
-        render_section("Area Member Present", area_list)
-        render_section("Other Area Member Present", other_list)
-        render_section("Truth Seeker Present", gospel_list)
-        render_section("Unidentified Individuals (Waiting Identification)", unknown_list)
+            ftr = ctk.CTkFrame(popup, fg_color="transparent")
+            ftr.pack(fill="x", padx=20, pady=(5, 12))
+            ctk.CTkLabel(ftr, text=f"{len(attendees)} attendance records · Export this session:",
+                         font=("Arial", 11, "bold"), text_color="#4B5563").pack(side="left")
+            ctk.CTkButton(ftr, text="⬇ Download Excel", width=130, height=36,
+                fg_color="#D1FAE5", text_color="#10B981", hover_color="#A7F3D0",
+                command=lambda: self._run_export("excel", session_id=session_id, parent=popup)).pack(side="left", padx=8)
+            ctk.CTkButton(ftr, text="📄 Download PDF", width=130, height=36,
+                fg_color="#FEE2E2", text_color="#EF4444", hover_color="#FCA5A5",
+                command=lambda: self._run_export("pdf", session_id=session_id, parent=popup)).pack(side="left")
+            popup.after(1, render_next_batch)
 
-        # Footer Export
-        ftr = ctk.CTkFrame(popup, fg_color="transparent")
-        ftr.pack(fill="x", padx=30, pady=(10, 20))
-        
-        ctk.CTkLabel(ftr, text="Export this session:", font=("Arial", 12, "bold"), text_color="#4B5563").pack(side="left")
-        
-        btn_excel = ctk.CTkButton(ftr, text="⬇ Download Excel", width=140, height=38, fg_color="#D1FAE5", text_color="#10B981", hover_color="#A7F3D0", font=("Arial", 12, "bold"), 
-                                  command=lambda: self._run_export("excel", session_id=session_id, parent=popup))
-        btn_excel.pack(side="left", padx=10)
-
-        btn_pdf = ctk.CTkButton(ftr, text="📄 Download PDF", width=140, height=38, fg_color="#FEE2E2", text_color="#EF4444", hover_color="#FCA5A5", font=("Arial", 12, "bold"), 
-                                command=lambda: self._run_export("pdf", session_id=session_id, parent=popup))
-        btn_pdf.pack(side="left")
+        threading.Thread(target=fetch_session_data, name=f"SessionReport-{session_id}", daemon=True).start()
+        popup.after(100, poll_result)
+        popup.protocol("WM_DELETE_WINDOW", lambda: (setattr(self, "_session_detail_opening", False), popup.destroy()))
 
     def _run_export_selected(self, kind):
         selected_ids = [sid for sid, var in self.session_checkboxes.items() if var.get()]
@@ -5018,6 +5209,10 @@ class AutoAttendanceApp(ctk.CTk):
                 time.sleep(0.05)
 
     def update_camera(self):
+        # Do not restart capture or schedule another refresh during shutdown.
+        if getattr(self, "_shutdown_requested", False):
+            return
+
         # Countdown / auto-stop
         if self.session_deadline:
             rem = self.session_deadline - datetime.now()
@@ -5056,7 +5251,11 @@ class AutoAttendanceApp(ctk.CTk):
                             # Ensure we don't dead-lock if backend crashes
                             print(f"[SYSTEM] Background processing error: {e}")
                             self.result_queue.put((None, []))
-                    threading.Thread(target=worker, args=(frame.copy(),), daemon=True).start()
+                    self._face_worker_thread = threading.Thread(
+                        target=worker, args=(frame.copy(),),
+                        name="FaceRecognitionWorker", daemon=True
+                    )
+                    self._face_worker_thread.start()
 
                 # 2. Check for results from thread
                 try:
